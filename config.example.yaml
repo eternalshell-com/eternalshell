@@ -1,0 +1,30 @@
+# EternalShell example config.
+#
+# Copy to /etc/eternalshell/config.yaml (or ./config.yaml for local tests) and
+# restrict it: chmod 600 /etc/eternalshell/config.yaml
+#
+# The TUI (`eternalshell`) works without a config. Only the watcher and
+# `eternalshell test-mail` need one.
+
+server:
+  name: main-vps          # shown in mails; defaults to the host name
+
+alerts:
+  cpu:
+    process: { percent: 80, duration: 15m }   # one process above 80 % of one core
+    total:   { percent: 90, duration: 10m }   # the whole server above 90 %
+  ssh:
+    allowed_users: [philip]
+    allowed_ips: [203.0.113.10]               # addresses or CIDR ranges
+  disk: { percent: 90 }                       # any mount fuller than this
+
+smtp:
+  host: smtp.example.com
+  port: 587               # 465 = implicit TLS, any other port = STARTTLS (required)
+  username: alert@example.com
+  # The password is NEVER written here. Name the environment variable instead,
+  # and export it (or set it as a systemd credential) before running:
+  #   export ETERNALSHELL_SMTP_PASSWORD='...'
+  password_env: ETERNALSHELL_SMTP_PASSWORD
+  # from: alert@example.com   # optional, defaults to username
+  to: [philip@example.com]

@@ -10,3 +10,7 @@
 .idea/
 .vscode/
 *.swp
+
+# Local config (may contain private addresses; the example is tracked)
+/config.yaml
+/config.yml
