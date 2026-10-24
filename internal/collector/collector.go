@@ -1,9 +1,10 @@
-// Package collector liest Systemwerte (CPU, RAM, Load, Disk, Prozesse).
-// Es liest nur, es verändert nichts auf dem Server.
+// Package collector reads system values (CPU, memory, load, disks, processes).
+// It only reads; it never changes anything on the server.
 package collector
 
 import (
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/shirou/gopsutil/v4/cpu"
@@ -13,16 +14,16 @@ import (
 	"github.com/shirou/gopsutil/v4/process"
 )
 
-// Process beschreibt einen Prozess zum Messzeitpunkt.
-// CPU ist pro Kern angegeben wie bei top: 100 = ein Kern voll ausgelastet.
+// Process describes a process at measurement time.
+// CPU is per core like top: 100 means one core fully used.
 type Process struct {
 	PID  int32
 	Name string
 	CPU  float64
-	RSS  uint64 // belegter Arbeitsspeicher in Bytes
+	RSS  uint64 // resident memory in bytes
 }
 
-// Mount beschreibt ein eingehängtes Dateisystem.
+// Mount describes a mounted filesystem.
 type Mount struct {
 	Path        string
 	Total       uint64
@@ -30,9 +31,9 @@ type Mount struct {
 	UsedPercent float64
 }
 
-// Snapshot ist eine Momentaufnahme des Servers.
+// Snapshot is a point-in-time view of the server.
 type Snapshot struct {
-	CPUPercent float64 // gesamter Server, 0-100
+	CPUPercent float64 // whole server, 0-100
 	Load1      float64
 	Load5      float64
 	Load15     float64
@@ -40,22 +41,22 @@ type Snapshot struct {
 	MemUsed    uint64
 	MemPercent float64
 	Mounts     []Mount
-	Processes  []Process // alle lesbaren Prozesse, nach CPU absteigend sortiert
+	Processes  []Process // all readable processes, sorted by CPU descending
 }
 
-// Collect misst über das Intervall interval (z. B. 1 s) und gibt den Snapshot zurück.
-// CPU-Werte sind Durchschnitte über dieses Intervall, nicht seit Prozessstart.
+// Collect measures over the given interval (e.g. 1 s) and returns a snapshot.
+// CPU values are averages over this interval, not since process start.
 func Collect(interval time.Duration) (*Snapshot, error) {
 	s := &Snapshot{}
 
-	// Erste Messung der Prozess-CPU-Zeiten, dann warten, dann zweite Messung.
+	// First reading of every process's CPU time, then wait, then second reading.
 	procs, err := process.Processes()
 	if err != nil {
 		return nil, err
 	}
 	before := cpuTimes(procs)
 
-	// Gesamt-CPU wartet selbst das Intervall ab; Prozesse warten gleichzeitig mit.
+	// The total CPU measurement sleeps for the interval itself.
 	total, err := cpu.Percent(interval, false)
 	if err != nil {
 		return nil, err
@@ -76,8 +77,8 @@ func Collect(interval time.Duration) (*Snapshot, error) {
 	return s, nil
 }
 
-// cpuTimes liest die bisher verbrauchte CPU-Zeit (Sekunden) pro PID.
-// Prozesse, die wir nicht lesen dürfen oder die gerade enden, werden übersprungen.
+// cpuTimes reads the CPU time (seconds) each PID has used so far.
+// Processes we may not read, or that are exiting, are skipped.
 func cpuTimes(procs []*process.Process) map[int32]float64 {
 	out := make(map[int32]float64, len(procs))
 	for _, p := range procs {
@@ -88,7 +89,7 @@ func cpuTimes(procs []*process.Process) map[int32]float64 {
 	return out
 }
 
-// measure berechnet aus zwei Messungen die CPU pro Prozess und sortiert das Ergebnis.
+// measure computes per-process CPU from two readings and sorts the result.
 func measure(procs []*process.Process, before map[int32]float64, interval time.Duration) []Process {
 	after := cpuTimes(procs)
 	var result []Process
@@ -96,7 +97,7 @@ func measure(procs []*process.Process, before map[int32]float64, interval time.D
 		b, ok1 := before[p.Pid]
 		a, ok2 := after[p.Pid]
 		if !ok1 || !ok2 {
-			continue // Prozess war nur in einer Messung da
+			continue // process was present in only one reading
 		}
 		name, err := p.Name()
 		if err != nil {
@@ -117,7 +118,7 @@ func measure(procs []*process.Process, before map[int32]float64, interval time.D
 	return result
 }
 
-// sortByCPU sortiert absteigend nach CPU, bei Gleichstand nach PID (stabile Ausgabe).
+// sortByCPU sorts descending by CPU, ties by PID (stable output).
 func sortByCPU(ps []Process) {
 	sort.Slice(ps, func(i, j int) bool {
 		if ps[i].CPU != ps[j].CPU {
@@ -127,9 +128,9 @@ func sortByCPU(ps []Process) {
 	})
 }
 
-// Top gibt die ersten n Prozesse nach CPU zurück.
+// Top returns the first n processes by CPU.
 func Top(ps []Process, n int) []Process {
-	sorted := append([]Process(nil), ps...) // Kopie, damit das Original unverändert bleibt
+	sorted := append([]Process(nil), ps...) // copy so the input stays untouched
 	sortByCPU(sorted)
 	if n < len(sorted) {
 		sorted = sorted[:n]
@@ -137,7 +138,13 @@ func Top(ps []Process, n int) []Process {
 	return sorted
 }
 
-// mounts liefert echte Dateisysteme ohne Doppelte (Bind-Mounts) und ohne Snap-Images.
+// skipMount reports whether a mount is noise for disk monitoring:
+// snap images and the EFI boot partition.
+func skipMount(path, fstype string) bool {
+	return fstype == "squashfs" || path == "/boot/efi" || strings.HasPrefix(path, "/boot/efi/")
+}
+
+// mounts returns real filesystems without duplicates (bind mounts).
 func mounts() []Mount {
 	parts, err := disk.Partitions(false)
 	if err != nil {
@@ -146,7 +153,7 @@ func mounts() []Mount {
 	seen := map[string]bool{}
 	var out []Mount
 	for _, p := range parts {
-		if seen[p.Device] || p.Fstype == "squashfs" {
+		if seen[p.Device] || skipMount(p.Mountpoint, p.Fstype) {
 			continue
 		}
 		seen[p.Device] = true
