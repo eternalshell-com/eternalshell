@@ -49,3 +49,32 @@ func TestTopMoreThanAvailable(t *testing.T) {
 		t.Fatalf("len = %d, want 1", len(got))
 	}
 }
+
+func TestIsKernelThread(t *testing.T) {
+	tests := []struct {
+		name    string
+		pid     int32
+		ppid    int32
+		cmdline []string
+		want    bool
+	}{
+		{"kthreadd", 2, 0, nil, true},
+		{"kworker", 54321, 2, nil, true},
+		{"empty cmdline", 900, 1, []string{}, true},
+		{"init", 1, 0, []string{"/sbin/init"}, false},
+		{"normal", 4000, 1, []string{"sshd", "-D"}, false},
+	}
+	for _, tt := range tests {
+		if got := isKernelThread(tt.pid, tt.ppid, tt.cmdline); got != tt.want {
+			t.Errorf("%s: got %v, want %v", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestUserProcesses(t *testing.T) {
+	in := []Process{{PID: 1}, {PID: 2, Kernel: true}, {PID: 3}}
+	got := UserProcesses(in)
+	if len(got) != 2 || got[0].PID != 1 || got[1].PID != 3 {
+		t.Errorf("UserProcesses = %+v", got)
+	}
+}

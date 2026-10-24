@@ -22,6 +22,12 @@ type Process struct {
 	Name string
 	CPU  float64
 	RSS  uint64 // resident memory in bytes
+	PPID int32
+
+	// Kernel marks kernel threads (kthreadd and its children). They have no
+	// command line. Zombies have none either and are counted here too, which is
+	// fine: they use no CPU or memory worth showing.
+	Kernel bool
 
 	Origin Origin // container, systemd service or host
 }
@@ -155,17 +161,38 @@ func measure(procs []*process.Process, before map[int32]float64, interval time.D
 		if mi, err := p.MemoryInfo(); err == nil {
 			rss = mi.RSS
 		}
+		ppid, _ := p.Ppid()
+		cmdline, _ := p.CmdlineSlice()
 		result = append(result, Process{
-			PID:  p.Pid,
-			Name: name,
-			CPU:  (a - b) / interval.Seconds() * 100,
-			RSS:  rss,
+			PID:    p.Pid,
+			Name:   name,
+			CPU:    (a - b) / interval.Seconds() * 100,
+			RSS:    rss,
+			PPID:   ppid,
+			Kernel: isKernelThread(p.Pid, ppid, cmdline),
 
 			Origin: readOrigin(p.Pid),
 		})
 	}
 	sortByCPU(result)
 	return result
+}
+
+// isKernelThread reports whether a process is a kernel thread: kthreadd itself
+// (PID 2), its children (PPID 2), or anything without a command line.
+func isKernelThread(pid, ppid int32, cmdline []string) bool {
+	return pid == 2 || ppid == 2 || len(cmdline) == 0
+}
+
+// UserProcesses returns ps without kernel threads, in the same order.
+func UserProcesses(ps []Process) []Process {
+	out := make([]Process, 0, len(ps))
+	for _, p := range ps {
+		if !p.Kernel {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // sortByCPU sorts descending by CPU, ties by PID (stable output).

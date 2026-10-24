@@ -24,9 +24,13 @@ func processColumns(width int) []table.Column {
 }
 
 // processRows builds one row per process. ps is already sorted by CPU.
-func processRows(ps []collector.Process) []table.Row {
+// Kernel threads are left out unless showKernel is set.
+func processRows(ps []collector.Process, showKernel bool) []table.Row {
 	rows := make([]table.Row, 0, len(ps))
 	for _, p := range ps {
+		if p.Kernel && !showKernel {
+			continue
+		}
 		rows = append(rows, table.Row{
 			strconv.Itoa(int(p.PID)),
 			p.Name,

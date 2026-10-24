@@ -49,6 +49,8 @@ type Model struct {
 	err     error               // error of the latest failed refresh
 	loading bool                // a collection is running; do not start another
 
+	showKernel bool // processes view: include kernel threads
+
 	width, height int
 	containers    list
 	processes     table.Model
@@ -105,6 +107,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "2":
 			m.view = viewProcesses
 			return m, nil
+		case "k":
+			if m.view == viewProcesses {
+				m.showKernel = !m.showKernel
+				if m.snap != nil {
+					m.refreshRows()
+				}
+				return m, nil
+			}
 		}
 
 	case tea.WindowSizeMsg:
@@ -171,7 +181,7 @@ func (m *Model) layout() {
 
 func (m *Model) refreshRows() {
 	m.containers.setRows(containerRows(m.snap.Containers))
-	m.processes.SetRows(processRows(m.snap.Processes))
+	m.processes.SetRows(processRows(m.snap.Processes, m.showKernel))
 	// Rows can shrink between refreshes; re-set the cursor so it is clamped.
 	m.processes.SetCursor(m.processes.Cursor())
 }
@@ -255,5 +265,13 @@ func (m Model) footerView() string {
 	if m.err != nil {
 		return errorStyle.Render(fmt.Sprintf(" refresh failed: %v", m.err))
 	}
-	return footerStyle.Render(" 1/2 switch view · ↑/↓ scroll · q quit")
+	keys := " 1/2 switch view · ↑/↓ scroll · q quit"
+	if m.view == viewProcesses {
+		state := "hidden"
+		if m.showKernel {
+			state = "shown"
+		}
+		keys = " 1/2 switch view · ↑/↓ scroll · k kernel threads (" + state + ") · q quit"
+	}
+	return footerStyle.Render(keys)
 }

@@ -54,7 +54,7 @@ func TestContainerRows(t *testing.T) {
 }
 
 func TestProcessRows(t *testing.T) {
-	rows := processRows(fakeSnapshot().Processes)
+	rows := processRows(fakeSnapshot().Processes, false)
 	if len(rows) != 2 {
 		t.Fatalf("len(rows) = %d", len(rows))
 	}
@@ -292,5 +292,36 @@ func TestListScrollKeepsCursorVisible(t *testing.T) {
 	}
 	if n := strings.Count(l.view(), "\n") + 1; n != 5 {
 		t.Errorf("view has %d lines, want 5", n)
+	}
+}
+
+func TestKernelThreadToggle(t *testing.T) {
+	snap := fakeSnapshot()
+	snap.Processes = append(snap.Processes, collector.Process{PID: 77, Name: "kworker/0:1", Kernel: true})
+	m := ready(t, snap)
+	m = press(m, "2")
+
+	if strings.Contains(m.View(), "kworker") {
+		t.Error("kernel threads should be hidden by default")
+	}
+	if !strings.Contains(m.View(), "kernel threads (hidden)") {
+		t.Error("footer should say kernel threads are hidden")
+	}
+
+	m = press(m, "k")
+	if !strings.Contains(m.View(), "kworker") || !strings.Contains(m.View(), "kernel threads (shown)") {
+		t.Errorf("k should show kernel threads:\n%s", m.View())
+	}
+
+	m = press(m, "k")
+	if strings.Contains(m.View(), "kworker") {
+		t.Error("second k should hide them again")
+	}
+
+	// k does nothing in the containers view
+	m = press(m, "1")
+	m = press(m, "k")
+	if m.showKernel {
+		t.Error("k must only act in the processes view")
 	}
 }
