@@ -2,14 +2,21 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"eternalshell/internal/collector"
+	"eternalshell/internal/config"
 	"eternalshell/internal/format"
+	"eternalshell/internal/mail"
 	"eternalshell/internal/tui"
 )
 
@@ -19,6 +26,9 @@ Without a command, eternalshell opens the live terminal UI.
 
 Commands:
   status    print CPU, load, memory, disks and the top 5 processes
+  test-mail [--config path]
+            send one test mail with the smtp settings from the config file
+            (default: /etc/eternalshell/config.yaml, then ./config.yaml)
 `
 
 func main() {
@@ -28,6 +38,8 @@ func main() {
 		err = runTUI()
 	case len(os.Args) == 2 && os.Args[1] == "status":
 		err = runStatus()
+	case os.Args[1] == "test-mail":
+		err = runTestMail(os.Args[2:])
 	default:
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
@@ -71,5 +83,51 @@ func runStatus() error {
 	for _, p := range collector.Top(collector.UserProcesses(snap.Processes), 5) {
 		fmt.Printf("%-8d %-20.20s %7s %8s  %s\n", p.PID, p.Name, format.Percent(p.CPU), format.Bytes(p.RSS), p.Origin)
 	}
+	return nil
+}
+
+// runTestMail sends one mail to check the smtp section of the config.
+func runTestMail(args []string) error {
+	fs := flag.NewFlagSet("test-mail", flag.ContinueOnError)
+	configPath := fs.String("config", "", "path to the config file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+
+	path, err := config.Find(*configPath)
+	if err != nil {
+		return err
+	}
+	fmt.Println("Config:", path)
+	if w := config.PermissionWarning(path); w != "" {
+		fmt.Fprintln(os.Stderr, "warning:", w)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		return err
+	}
+	if err := cfg.ValidateSMTP(); err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	password, err := cfg.SMTP.Password()
+	if err != nil {
+		return err
+	}
+
+	s := cfg.SMTP
+	fmt.Printf("Sending test mail to %s via %s:%d (%s)...\n",
+		strings.Join(s.To, ", "), s.Host, s.Port, mail.TransportFor(s.Port))
+
+	// Ctrl+C cancels the connection attempt.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	if err := mail.Send(ctx, s, password, mail.TestMessage(cfg.Server.Name, time.Now())); err != nil {
+		return errors.New(mail.Explain(err, s))
+	}
+	fmt.Println("OK: the mail server accepted the message. Check the inbox (and the spam folder).")
 	return nil
 }
