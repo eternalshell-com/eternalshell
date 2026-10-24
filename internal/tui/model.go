@@ -243,5 +243,5 @@ func (m Model) footerView() string {
 	if m.err != nil {
 		return errorStyle.Render(fmt.Sprintf(" refresh failed: %v", m.err))
 	}
-	return footerStyle.Render(" 1 containers · 2 processes · ↑/↓ scroll · q quit")
+	return footerStyle.Render(" 1/2 switch view · ↑/↓ scroll · q quit")
 }
