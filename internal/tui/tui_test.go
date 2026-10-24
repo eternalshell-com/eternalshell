@@ -35,20 +35,20 @@ func TestContainerRows(t *testing.T) {
 	if len(rows) != 5 {
 		t.Fatalf("len(rows) = %d, want 5: %v", len(rows), rows)
 	}
-	if rows[0][0] != "lienks-app" || rows[3][0] != standaloneGroup {
-		t.Errorf("group headers wrong: %q, %q", rows[0][0], rows[3][0])
+	if rows[0].cells[0] != "lienks-app" || rows[3].cells[0] != standaloneGroup {
+		t.Errorf("group headers wrong: %q, %q", rows[0].cells[0], rows[3].cells[0])
 	}
-	if got := rows[1][0]; got != "  ● app" { // service name inside a project
+	if got := rows[1].cells[0]; got != "  ● app" { // service name inside a project
 		t.Errorf("row 1 name = %q", got)
 	}
-	if rows[1][2] != "12%" || rows[1][3] != "90.0M" {
-		t.Errorf("row 1 cpu/mem = %q/%q", rows[1][2], rows[1][3])
+	if rows[1].cells[2] != "12%" || rows[1].cells[3] != "90.0M" {
+		t.Errorf("row 1 cpu/mem = %q/%q", rows[1].cells[2], rows[1].cells[3])
 	}
 	// stopped container: no CPU/MEM, but restarts are shown
-	if rows[2][0] != "  ○ cron" || rows[2][2] != "-" || rows[2][3] != "-" || rows[2][4] != "3" {
-		t.Errorf("stopped row = %v", rows[2])
+	if rows[2].cells[0] != "  ○ cron" || rows[2].cells[2] != "-" || rows[2].cells[3] != "-" || rows[2].cells[4] != "3" {
+		t.Errorf("stopped row = %v", rows[2].cells)
 	}
-	if got := rows[4][0]; got != "  ● traefik" {
+	if got := rows[4].cells[0]; got != "  ● traefik" {
 		t.Errorf("standalone name = %q", got)
 	}
 }
@@ -144,5 +144,153 @@ func TestTickDoesNotOverlap(t *testing.T) {
 	again, _ := next.Update(tickMsg{})
 	if !again.(Model).loading {
 		t.Error("tick during a running collection must not reset loading")
+	}
+}
+
+func TestExitCode(t *testing.T) {
+	tests := []struct {
+		status string
+		code   int
+		ok     bool
+	}{
+		{"Exited (143) 6 months ago", 143, true},
+		{"Exited (0) 3 days ago", 0, true},
+		{"Up 2 weeks", 0, false},
+		{"Created", 0, false},
+	}
+	for _, tt := range tests {
+		code, ok := exitCode(tt.status)
+		if code != tt.code || ok != tt.ok {
+			t.Errorf("exitCode(%q) = (%d, %v), want (%d, %v)", tt.status, code, ok, tt.code, tt.ok)
+		}
+	}
+}
+
+func TestProblem(t *testing.T) {
+	tests := []struct {
+		name string
+		c    collector.Container
+		want bool
+	}{
+		{"healthy", collector.Container{State: "running", CPU: 5}, false},
+		{"running with restarts", collector.Container{State: "running", Restarts: 2}, true},
+		{"high CPU", collector.Container{State: "running", CPU: 80}, true},
+		{"exited cleanly", collector.Container{State: "exited", Status: "Exited (0) 3 days ago"}, false},
+		{"docker stop (143)", collector.Container{State: "exited", Status: "Exited (143) 6 months ago"}, false},
+		{"crashed", collector.Container{State: "exited", Status: "Exited (1) 2 minutes ago"}, true},
+		{"stopped, old restarts", collector.Container{State: "exited", Status: "Exited (0) 1 day ago", Restarts: 5}, false},
+		{"restarting loop", collector.Container{State: "restarting"}, true},
+		{"dead", collector.Container{State: "dead"}, true},
+		{"created", collector.Container{State: "created", Status: "Created"}, false},
+	}
+	for _, tt := range tests {
+		if got := problem(tt.c); got != tt.want {
+			t.Errorf("%s: problem = %v, want %v", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestGroupOrder(t *testing.T) {
+	cs := []collector.Container{
+		{Name: "traefik", State: "running"},
+		{Name: "z-ok", Project: "zeta", Service: "z", State: "running"},
+		{Name: "a-ok", Project: "alpha", Service: "a", State: "running"},
+		{Name: "b-ok", Project: "beta", Service: "b", State: "running"},
+		{Name: "b-crash", Project: "beta", Service: "c", State: "exited", Status: "Exited (1) now"},
+		{Name: "lone-crash", State: "running", Restarts: 1},
+	}
+	groups := groupContainers(cs)
+
+	var names []string
+	for _, g := range groups {
+		names = append(names, g.name)
+	}
+	want := []string{"beta", "standalone", "alpha", "zeta"} // problems first, then alphabetical
+	for i, w := range want {
+		if names[i] != w {
+			t.Fatalf("group order = %v, want %v", names, want)
+		}
+	}
+	if groups[0].containers[0].Name != "b-crash" {
+		t.Errorf("problem container should come first in its group: %+v", groups[0].containers)
+	}
+	if groups[1].containers[0].Name != "lone-crash" {
+		t.Errorf("standalone problem container should come first: %+v", groups[1].containers)
+	}
+
+	rows := containerRows(cs)
+	if rows[0].cells[0] != "beta !" {
+		t.Errorf("first header = %q, want %q", rows[0].cells[0], "beta !")
+	}
+}
+
+func TestListCursorSkipsHeaders(t *testing.T) {
+	l := list{cols: containerColumns(80)}
+	l.setSize(80, 8)
+	l.setRows([]listRow{
+		{cells: []string{"A"}, header: true},
+		{cells: []string{"a1"}, id: "a1"},
+		{cells: []string{"a2"}, id: "a2"},
+		{cells: []string{"B"}, header: true},
+		{cells: []string{"b1"}, id: "b1"},
+	})
+	if l.selectedID() != "a1" {
+		t.Fatalf("initial selection = %q, want a1 (header skipped)", l.selectedID())
+	}
+	l.move(1)
+	l.move(1) // jumps over header B
+	if l.selectedID() != "b1" {
+		t.Errorf("selection = %q, want b1", l.selectedID())
+	}
+	l.move(1) // already last
+	if l.selectedID() != "b1" {
+		t.Errorf("selection moved past the end: %q", l.selectedID())
+	}
+	l.move(-1)
+	l.move(-1)
+	l.move(-1) // already first
+	if l.selectedID() != "a1" {
+		t.Errorf("selection = %q, want a1", l.selectedID())
+	}
+}
+
+func TestListKeepsSelectionAcrossRefresh(t *testing.T) {
+	l := list{cols: containerColumns(80)}
+	l.setSize(80, 8)
+	rows := []listRow{
+		{cells: []string{"A"}, header: true},
+		{cells: []string{"a1"}, id: "a1"},
+		{cells: []string{"a2"}, id: "a2"},
+	}
+	l.setRows(rows)
+	l.move(1)
+	// a new group appears above; the selected container moves down
+	l.setRows(append([]listRow{{cells: []string{"Z"}, header: true}, {cells: []string{"z1"}, id: "z1"}}, rows...))
+	if l.selectedID() != "a2" {
+		t.Errorf("selection = %q, want a2", l.selectedID())
+	}
+	// the selected container disappears: cursor lands on a real row
+	l.setRows(rows[:2])
+	if l.selectedID() == "" {
+		t.Error("cursor should land on a container when the selected one vanishes")
+	}
+}
+
+func TestListScrollKeepsCursorVisible(t *testing.T) {
+	l := list{cols: containerColumns(80)}
+	l.setSize(80, 5) // 3 body lines
+	var rows []listRow
+	for i := 0; i < 10; i++ {
+		rows = append(rows, listRow{cells: []string{"c"}, id: string(rune('a' + i))})
+	}
+	l.setRows(rows)
+	for i := 0; i < 7; i++ {
+		l.move(1)
+	}
+	if l.cursor < l.offset || l.cursor >= l.offset+3 {
+		t.Errorf("cursor %d outside window [%d,%d)", l.cursor, l.offset, l.offset+3)
+	}
+	if n := strings.Count(l.view(), "\n") + 1; n != 5 {
+		t.Errorf("view has %d lines, want 5", n)
 	}
 }

@@ -10,13 +10,17 @@ var (
 	accent = lipgloss.AdaptiveColor{Light: "25", Dark: "81"}
 	warn   = lipgloss.AdaptiveColor{Light: "160", Dark: "203"}
 
-	titleStyle     = lipgloss.NewStyle().Bold(true).Foreground(accent)
-	infoStyle      = lipgloss.NewStyle().Foreground(dim)
-	tabActive      = lipgloss.NewStyle().Bold(true).Foreground(accent)
-	tabInactive    = lipgloss.NewStyle().Foreground(dim)
-	footerStyle    = lipgloss.NewStyle().Foreground(dim)
-	errorStyle     = lipgloss.NewStyle().Foreground(warn)
-	emptyViewStyle = lipgloss.NewStyle().Foreground(dim).PaddingLeft(1)
+	dimStyle        = lipgloss.NewStyle().Foreground(dim)
+	selectedStyle   = lipgloss.NewStyle().Bold(true).Foreground(accent)
+	headerStyle     = lipgloss.NewStyle().Bold(true)
+	headerWarnStyle = lipgloss.NewStyle().Bold(true).Foreground(warn)
+	titleStyle      = lipgloss.NewStyle().Bold(true).Foreground(accent)
+	infoStyle       = lipgloss.NewStyle().Foreground(dim)
+	tabActive       = lipgloss.NewStyle().Bold(true).Foreground(accent)
+	tabInactive     = lipgloss.NewStyle().Foreground(dim)
+	footerStyle     = lipgloss.NewStyle().Foreground(dim)
+	errorStyle      = lipgloss.NewStyle().Foreground(warn)
+	emptyViewStyle  = lipgloss.NewStyle().Foreground(dim).PaddingLeft(1)
 )
 
 // tableStyles is a quiet table: bold header with a line below, and a subtle

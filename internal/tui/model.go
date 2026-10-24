@@ -50,7 +50,7 @@ type Model struct {
 	loading bool                // a collection is running; do not start another
 
 	width, height int
-	containers    table.Model
+	containers    list
 	processes     table.Model
 }
 
@@ -61,13 +61,12 @@ func New(col *collector.Collector) Model {
 		return table.New(table.WithFocused(true), table.WithStyles(tableStyles()))
 	}
 	m := Model{
-		col:        col,
-		host:       host,
-		loading:    true,
-		width:      80,
-		height:     24,
-		containers: newTable(),
-		processes:  newTable(),
+		col:       col,
+		host:      host,
+		loading:   true,
+		width:     80,
+		height:    24,
+		processes: newTable(),
 	}
 	m.layout()
 	return m
@@ -134,12 +133,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	// Anything else (arrow keys, page up/down) scrolls the visible table.
-	var cmd tea.Cmd
 	if m.view == viewContainers {
-		m.containers, cmd = m.containers.Update(msg)
-	} else {
-		m.processes, cmd = m.processes.Update(msg)
+		if k, ok := msg.(tea.KeyMsg); ok {
+			switch k.String() {
+			case "up":
+				m.containers.move(-1)
+			case "down":
+				m.containers.move(1)
+			case "pgup":
+				m.containers.page(-1)
+			case "pgdown":
+				m.containers.page(1)
+			case "home":
+				m.containers.top()
+			case "end":
+				m.containers.bottom()
+			}
+		}
+		return m, nil
 	}
+	var cmd tea.Cmd
+	m.processes, cmd = m.processes.Update(msg)
 	return m, cmd
 }
 
@@ -148,19 +162,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *Model) layout() {
 	const chrome = 3
 	h := max(m.height-chrome, 4)
-	m.containers.SetColumns(containerColumns(m.width))
+	m.containers.cols = containerColumns(m.width)
+	m.containers.setSize(m.width, h)
 	m.processes.SetColumns(processColumns(m.width))
-	m.containers.SetHeight(h)
 	m.processes.SetHeight(h)
-	m.containers.SetWidth(m.width)
 	m.processes.SetWidth(m.width)
 }
 
 func (m *Model) refreshRows() {
-	m.containers.SetRows(containerRows(m.snap.Containers))
+	m.containers.setRows(containerRows(m.snap.Containers))
 	m.processes.SetRows(processRows(m.snap.Processes))
 	// Rows can shrink between refreshes; re-set the cursor so it is clamped.
-	m.containers.SetCursor(m.containers.Cursor())
 	m.processes.SetCursor(m.processes.Cursor())
 }
 
@@ -229,7 +241,7 @@ func (m Model) bodyView() string {
 	case len(m.snap.Containers) == 0:
 		return m.message("No containers.")
 	}
-	return m.containers.View()
+	return m.containers.view()
 }
 
 // message renders a text block with the same height as the tables, so the
