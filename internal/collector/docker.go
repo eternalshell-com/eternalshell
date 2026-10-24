@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/client"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/client"
 )
 
 const (
@@ -63,7 +63,7 @@ type Docker struct {
 }
 
 func newDocker() *Docker {
-	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	cli, err := client.New(client.FromEnv) // API version negotiation is the default
 	return &Docker{cli: cli, err: err, cache: map[string]restartInfo{}}
 }
 
@@ -78,15 +78,15 @@ func (d *Docker) list(ctx context.Context) ([]Container, error) {
 	if d.err != nil {
 		return nil, d.err
 	}
-	summaries, err := d.cli.ContainerList(ctx, container.ListOptions{All: true})
+	res, err := d.cli.ContainerList(ctx, client.ContainerListOptions{All: true})
 	if err != nil {
 		return nil, err
 	}
 
 	now := time.Now()
-	seen := make(map[string]bool, len(summaries))
-	out := make([]Container, 0, len(summaries))
-	for _, s := range summaries {
+	seen := make(map[string]bool, len(res.Items))
+	out := make([]Container, 0, len(res.Items))
+	for _, s := range res.Items {
 		c := fromSummary(s)
 		c.Restarts = d.restarts(ctx, c, now)
 		seen[c.ID] = true
@@ -108,12 +108,13 @@ func (d *Docker) restarts(ctx context.Context, c Container, now time.Time) int {
 	if ok && e.state == c.State && now.Sub(e.at) < restartTTL {
 		return e.restarts
 	}
-	info, err := d.cli.ContainerInspect(ctx, c.ID)
-	if err != nil || info.ContainerJSONBase == nil {
+	info, err := d.cli.ContainerInspect(ctx, c.ID, client.ContainerInspectOptions{})
+	if err != nil {
 		return e.restarts // zero if never known
 	}
-	d.cache[c.ID] = restartInfo{state: c.State, at: now, restarts: info.RestartCount}
-	return info.RestartCount
+	n := info.Container.RestartCount
+	d.cache[c.ID] = restartInfo{state: c.State, at: now, restarts: n}
+	return n
 }
 
 // fromSummary converts the Docker API's list entry to our Container.
