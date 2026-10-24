@@ -88,6 +88,7 @@ func TestOriginString(t *testing.T) {
 		{Origin{Kind: KindService, Unit: "ssh.service"}, "systemd: ssh.service"},
 		{Origin{Kind: KindContainer, ContainerID: id}, "container 3f2a1c9b4d7e"},
 		{Origin{Kind: KindContainer, ContainerID: id, ContainerName: "uptime-kuma"}, "container uptime-kuma"},
+		{Origin{Kind: KindContainer, ContainerID: id, ContainerName: "heuristic_shirley", Image: "allinurl/goaccess"}, "container heuristic_shirley (allinurl/goaccess)"},
 		{Origin{Kind: KindContainer, ContainerID: id, ContainerName: "lienks-app-clickhouse-1", Project: "lienks-app", Service: "clickhouse"}, "container lienks-app/clickhouse"},
 	}
 	for _, tt := range tests {

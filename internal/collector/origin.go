@@ -27,6 +27,7 @@ type Origin struct {
 	ContainerName string
 	Project       string // compose project, empty if standalone
 	Service       string // compose service
+	Image         string // short image name
 }
 
 // containerRe finds a Docker container ID in a cgroup path. It matches both the
@@ -91,6 +92,8 @@ func (o Origin) String() string {
 		switch {
 		case o.Project != "" && o.Service != "":
 			return fmt.Sprintf("container %s/%s", o.Project, o.Service)
+		case o.ContainerName != "" && o.Image != "":
+			return fmt.Sprintf("container %s (%s)", o.ContainerName, o.Image)
 		case o.ContainerName != "":
 			return "container " + o.ContainerName
 		default:

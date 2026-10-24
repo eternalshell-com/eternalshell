@@ -52,7 +52,7 @@ func TestAttach(t *testing.T) {
 		{PID: 3, CPU: 50, Origin: Origin{Kind: KindHost}},
 		{PID: 4, CPU: 10, Origin: Origin{Kind: KindContainer, ContainerID: other}}, // unknown to Docker
 	}
-	cs := []Container{{ID: id, Name: "clickhouse-1", Project: "lienks-app", Service: "clickhouse"}}
+	cs := []Container{{ID: id, Name: "clickhouse-1", Project: "lienks-app", Service: "clickhouse", Image: "clickhouse/clickhouse-server"}}
 
 	attach(procs, cs)
 
@@ -64,6 +64,9 @@ func TestAttach(t *testing.T) {
 	}
 	if got := procs[0].Origin.String(); got != "container lienks-app/clickhouse" {
 		t.Errorf("origin = %q", got)
+	}
+	if procs[0].Origin.Image != "clickhouse/clickhouse-server" {
+		t.Errorf("image not copied to origin: %+v", procs[0].Origin)
 	}
 	if got := procs[3].Origin.String(); got != "container ffffffffffff" {
 		t.Errorf("unknown container origin = %q", got)
@@ -115,4 +118,24 @@ func TestReadMemUsage(t *testing.T) {
 			t.Error("ok = true, want false")
 		}
 	})
+}
+
+func TestShortImage(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"alpine", "alpine"},
+		{"alpine:latest", "alpine"},
+		{"allinurl/goaccess:latest", "allinurl/goaccess"},
+		{"postgres:17.10-bookworm", "postgres:17.10-bookworm"},
+		{"ghcr.io/open-webui/open-webui:main", "ghcr.io/open-webui/open-webui:main"},
+		{"localhost:5000/app", "localhost:5000/app"},
+		{"localhost:5000/app:latest", "localhost:5000/app"},
+		{"nginx@sha256:abcdef", "nginx"},
+		{"sha256:0123456789abcdef0123", "0123456789ab"},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		if got := shortImage(tt.in); got != tt.want {
+			t.Errorf("shortImage(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
 }

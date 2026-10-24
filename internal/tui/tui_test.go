@@ -17,7 +17,7 @@ func fakeSnapshot() *collector.Snapshot {
 		Containers: []collector.Container{
 			{Name: "lienks-app-app-1", Project: "lienks-app", Service: "app", State: "running", Status: "Up 2 weeks (healthy)", CPU: 12, MemBytes: 90 << 20, MemOK: true},
 			{Name: "lienks-app-cron-1", Project: "lienks-app", Service: "cron", State: "exited", Status: "Exited (143) 6 months ago", Restarts: 3},
-			{Name: "traefik", State: "running", Status: "Up 6 weeks", CPU: 0, MemBytes: 53 << 20, MemOK: true},
+			{Name: "traefik", Image: "traefik:v3.1", State: "running", Status: "Up 6 weeks", CPU: 0, MemBytes: 53 << 20, MemOK: true},
 		},
 		Processes: []collector.Process{
 			{PID: 48211, Name: "xmrig", CPU: 382, RSS: 210 << 20,
@@ -48,7 +48,7 @@ func TestContainerRows(t *testing.T) {
 	if rows[2].cells[0] != "  ○ cron" || rows[2].cells[2] != "-" || rows[2].cells[3] != "-" || rows[2].cells[4] != "3" {
 		t.Errorf("stopped row = %v", rows[2].cells)
 	}
-	if got := rows[4].cells[0]; got != "  ● traefik" {
+	if got := rows[4].cells[0]; got != "  ● traefik (traefik:v3.1)" {
 		t.Errorf("standalone name = %q", got)
 	}
 }

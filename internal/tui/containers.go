@@ -148,6 +148,8 @@ func containerRow(c collector.Container) listRow {
 	name := c.Name
 	if c.Project != "" && c.Service != "" {
 		name = c.Service
+	} else if c.Image != "" {
+		name += " (" + c.Image + ")" // without a project the image says what it is
 	}
 
 	marker := "○"

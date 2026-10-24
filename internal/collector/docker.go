@@ -34,6 +34,7 @@ type Container struct {
 	Name     string
 	Project  string // compose project, empty if standalone
 	Service  string // compose service
+	Image    string // short image name, e.g. "allinurl/goaccess"
 	State    string // running, exited, restarting, ...
 	Status   string // human text from Docker, e.g. "Up 2 weeks (healthy)"
 	Restarts int
@@ -128,9 +129,28 @@ func fromSummary(s container.Summary) Container {
 		Name:    name,
 		Project: s.Labels[labelProject],
 		Service: s.Labels[labelService],
+		Image:   shortImage(s.Image),
 		State:   string(s.State),
 		Status:  s.Status,
 	}
+}
+
+// shortImage makes an image reference short enough to show next to a name:
+// the digest and a ":latest" tag are dropped, and a bare image ID is cut to 12
+// characters. "ghcr.io/open-webui/open-webui:main" stays as it is.
+func shortImage(ref string) string {
+	if id, ok := strings.CutPrefix(ref, "sha256:"); ok {
+		return id[:min(len(id), 12)]
+	}
+	if i := strings.Index(ref, "@"); i >= 0 {
+		ref = ref[:i]
+	}
+	// A colon is a tag separator only after the last slash ("host:5000/img" has none).
+	slash := strings.LastIndex(ref, "/")
+	if i := strings.LastIndex(ref, ":"); i > slash && ref[i+1:] == "latest" {
+		ref = ref[:i]
+	}
+	return ref
 }
 
 // sortContainers orders by project (standalone containers last), then name.
@@ -165,7 +185,7 @@ func attach(procs []Process, cs []Container) {
 			continue // Docker does not know it (or is unreachable): keep the short ID
 		}
 		c := &cs[idx]
-		o.ContainerName, o.Project, o.Service = c.Name, c.Project, c.Service
+		o.ContainerName, o.Project, o.Service, o.Image = c.Name, c.Project, c.Service, c.Image
 		c.CPU += procs[i].CPU
 		if c.CgroupPath == "" {
 			c.CgroupPath = o.CgroupPath
