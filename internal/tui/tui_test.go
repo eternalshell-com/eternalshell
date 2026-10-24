@@ -12,17 +12,17 @@ import (
 
 func fakeSnapshot() *collector.Snapshot {
 	return &collector.Snapshot{
-		CPUPercent: 6, MemPercent: 33, Load1: 0.4, Load5: 0.3, Load15: 0.2,
+		CPUPercent: 6, CPUKnown: true, MemPercent: 33, Load1: 0.4, Load5: 0.3, Load15: 0.2,
 		Mounts: []collector.Mount{{Path: "/", UsedPercent: 84}},
 		Containers: []collector.Container{
-			{Name: "lienks-app-app-1", Project: "lienks-app", Service: "app", State: "running", Status: "Up 2 weeks (healthy)", CPU: 12, MemBytes: 90 << 20, MemOK: true},
+			{Name: "lienks-app-app-1", Project: "lienks-app", Service: "app", State: "running", Status: "Up 2 weeks (healthy)", CPU: 12, CPUKnown: true, MemBytes: 90 << 20, MemOK: true},
 			{Name: "lienks-app-cron-1", Project: "lienks-app", Service: "cron", State: "exited", Status: "Exited (143) 6 months ago", Restarts: 3},
-			{Name: "traefik", Image: "traefik:v3.1", State: "running", Status: "Up 6 weeks", CPU: 0, MemBytes: 53 << 20, MemOK: true},
+			{Name: "traefik", Image: "traefik:v3.1", State: "running", Status: "Up 6 weeks", CPU: 0, CPUKnown: true, MemBytes: 53 << 20, MemOK: true},
 		},
 		Processes: []collector.Process{
-			{PID: 48211, Name: "xmrig", CPU: 382, RSS: 210 << 20,
+			{PID: 48211, Name: "xmrig", CPU: 382, CPUKnown: true, RSS: 210 << 20,
 				Origin: collector.Origin{Kind: collector.KindContainer, ContainerID: strings.Repeat("a", 64), Project: "test", Service: "old-test"}},
-			{PID: 611, Name: "sshd", CPU: 0, RSS: 8 << 20,
+			{PID: 611, Name: "sshd", CPU: 0, CPUKnown: true, RSS: 8 << 20,
 				Origin: collector.Origin{Kind: collector.KindService, Unit: "ssh.service"}},
 		},
 	}
@@ -323,5 +323,28 @@ func TestKernelThreadToggle(t *testing.T) {
 	m = press(m, "k")
 	if m.showKernel {
 		t.Error("k must only act in the processes view")
+	}
+}
+
+func TestUnknownCPUShowsDash(t *testing.T) {
+	snap := fakeSnapshot()
+	snap.CPUKnown = false
+	for i := range snap.Containers {
+		snap.Containers[i].CPUKnown = false
+	}
+	for i := range snap.Processes {
+		snap.Processes[i].CPUKnown = false
+	}
+
+	m := ready(t, snap)
+	if !strings.Contains(m.View(), "CPU -") {
+		t.Errorf("header should show CPU -:\n%s", m.View())
+	}
+	rows := containerRows(snap.Containers)
+	if rows[1].cells[2] != "-" {
+		t.Errorf("running container CPU = %q, want -", rows[1].cells[2])
+	}
+	if got := processRows(snap.Processes, false)[0][2]; got != "-" {
+		t.Errorf("process CPU = %q, want -", got)
 	}
 }

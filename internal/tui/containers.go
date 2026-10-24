@@ -156,7 +156,9 @@ func containerRow(c collector.Container) listRow {
 	cpu, mem := "-", "-"
 	if c.Running() {
 		marker = "●"
-		cpu = format.Percent(c.CPU)
+		if c.CPUKnown {
+			cpu = format.Percent(c.CPU)
+		}
 		if c.MemOK {
 			mem = format.Bytes(c.MemBytes)
 		}

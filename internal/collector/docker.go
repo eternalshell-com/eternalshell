@@ -40,6 +40,7 @@ type Container struct {
 	Restarts int
 
 	CPU        float64 // sum of its processes' CPU, 100 = one core
+	CPUKnown   bool    // false until at least one of its processes has a CPU value
 	MemBytes   uint64  // cgroup memory.current minus inactive_file
 	MemOK      bool    // false if the cgroup could not be read (e.g. stopped)
 	CgroupPath string  // taken from the container's processes
@@ -186,7 +187,10 @@ func attach(procs []Process, cs []Container) {
 		}
 		c := &cs[idx]
 		o.ContainerName, o.Project, o.Service, o.Image = c.Name, c.Project, c.Service, c.Image
-		c.CPU += procs[i].CPU
+		if procs[i].CPUKnown {
+			c.CPU += procs[i].CPU
+			c.CPUKnown = true
+		}
 		if c.CgroupPath == "" {
 			c.CgroupPath = o.CgroupPath
 		}

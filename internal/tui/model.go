@@ -18,10 +18,9 @@ import (
 	"eternalshell/internal/format"
 )
 
-const (
-	refreshEvery = 2 * time.Second
-	measureFor   = time.Second // CPU values are averaged over this long
-)
+// refreshEvery is the time between two snapshots. CPU values are averages over
+// this interval.
+const refreshEvery = 2 * time.Second
 
 type view int
 
@@ -89,7 +88,7 @@ func tick() tea.Cmd {
 func (m Model) collect() tea.Cmd {
 	col := m.col
 	return func() tea.Msg {
-		snap, err := col.Collect(measureFor)
+		snap, err := col.Collect()
 		return snapshotMsg{snap: snap, err: err}
 	}
 }
@@ -123,8 +122,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
-		// The timer always keeps running; a new measurement only starts if the
-		// previous one has finished (a measurement takes about a second).
+		// The timer always keeps running; a new collection only starts if the
+		// previous one has finished (normally it is done within milliseconds).
 		if m.loading {
 			return m, tick()
 		}
@@ -205,8 +204,12 @@ func (m Model) infoView() string {
 		return s + infoStyle.Render(" · collecting…")
 	}
 	n := m.snap
+	cpu := "-"
+	if n.CPUKnown {
+		cpu = format.Percent(n.CPUPercent)
+	}
 	s += infoStyle.Render(fmt.Sprintf(" · CPU %s · MEM %s · load %.2f %.2f %.2f",
-		format.Percent(n.CPUPercent), format.Percent(n.MemPercent), n.Load1, n.Load5, n.Load15))
+		cpu, format.Percent(n.MemPercent), n.Load1, n.Load5, n.Load15))
 	if root := rootMount(n.Mounts); root != nil {
 		s += infoStyle.Render(fmt.Sprintf(" · disk %s %s", root.Path, format.Percent(root.UsedPercent)))
 	}

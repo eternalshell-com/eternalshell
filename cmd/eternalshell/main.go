@@ -49,7 +49,12 @@ func runTUI() error {
 func runStatus() error {
 	c := collector.New()
 	defer c.Close()
-	snap, err := c.Collect(time.Second)
+	// CPU values are changes between two samples, so take one, wait, take another.
+	if _, err := c.Collect(); err != nil {
+		return err
+	}
+	time.Sleep(time.Second)
+	snap, err := c.Collect()
 	if err != nil {
 		return err
 	}

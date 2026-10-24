@@ -31,10 +31,14 @@ func processRows(ps []collector.Process, showKernel bool) []table.Row {
 		if p.Kernel && !showKernel {
 			continue
 		}
+		cpu := "-"
+		if p.CPUKnown {
+			cpu = format.Percent(p.CPU)
+		}
 		rows = append(rows, table.Row{
 			strconv.Itoa(int(p.PID)),
 			p.Name,
-			format.Percent(p.CPU),
+			cpu,
 			format.Bytes(p.RSS),
 			p.Origin.String(),
 		})

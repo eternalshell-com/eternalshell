@@ -47,10 +47,10 @@ func TestSortContainers(t *testing.T) {
 func TestAttach(t *testing.T) {
 	other := "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 	procs := []Process{
-		{PID: 1, CPU: 120, Origin: Origin{Kind: KindContainer, ContainerID: id, CgroupPath: "/system.slice/docker-" + id + ".scope"}},
-		{PID: 2, CPU: 30, Origin: Origin{Kind: KindContainer, ContainerID: id, CgroupPath: "/system.slice/docker-" + id + ".scope"}},
-		{PID: 3, CPU: 50, Origin: Origin{Kind: KindHost}},
-		{PID: 4, CPU: 10, Origin: Origin{Kind: KindContainer, ContainerID: other}}, // unknown to Docker
+		{PID: 1, CPU: 120, CPUKnown: true, Origin: Origin{Kind: KindContainer, ContainerID: id, CgroupPath: "/system.slice/docker-" + id + ".scope"}},
+		{PID: 2, CPU: 30, CPUKnown: true, Origin: Origin{Kind: KindContainer, ContainerID: id, CgroupPath: "/system.slice/docker-" + id + ".scope"}},
+		{PID: 3, CPU: 50, CPUKnown: true, Origin: Origin{Kind: KindHost}},
+		{PID: 4, CPU: 10, CPUKnown: true, Origin: Origin{Kind: KindContainer, ContainerID: other}}, // unknown to Docker
 	}
 	cs := []Container{{ID: id, Name: "clickhouse-1", Project: "lienks-app", Service: "clickhouse", Image: "clickhouse/clickhouse-server"}}
 
@@ -58,6 +58,9 @@ func TestAttach(t *testing.T) {
 
 	if cs[0].CPU != 150 {
 		t.Errorf("container CPU = %v, want 150", cs[0].CPU)
+	}
+	if !cs[0].CPUKnown {
+		t.Error("container CPU should be known when its processes are")
 	}
 	if cs[0].CgroupPath == "" {
 		t.Error("container CgroupPath not set")
@@ -137,5 +140,14 @@ func TestShortImage(t *testing.T) {
 		if got := shortImage(tt.in); got != tt.want {
 			t.Errorf("shortImage(%q) = %q, want %q", tt.in, got, tt.want)
 		}
+	}
+}
+
+func TestAttachUnknownCPU(t *testing.T) {
+	procs := []Process{{PID: 1, CPU: 0, Origin: Origin{Kind: KindContainer, ContainerID: id}}}
+	cs := []Container{{ID: id}}
+	attach(procs, cs)
+	if cs[0].CPUKnown {
+		t.Error("container CPU must stay unknown while all its processes are unknown")
 	}
 }
