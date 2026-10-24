@@ -1,0 +1,12 @@
+# Gebaute Binaries
+/eternalshell
+/bin/
+
+# Go-Testartefakte
+*.test
+*.out
+
+# Editor
+.idea/
+.vscode/
+*.swp
