@@ -22,6 +22,13 @@ import (
 // this interval.
 const refreshEvery = 2 * time.Second
 
+// chromeLines are the screen rows around the main area: info line, tabs (or log
+// title) and footer.
+const chromeLines = 3
+
+// logLinesShown is the number of log lines requested; shown in the log title.
+const logLinesShown = 200
+
 type view int
 
 const (
@@ -49,6 +56,7 @@ type Model struct {
 	loading bool                // a collection is running; do not start another
 
 	showKernel bool // processes view: include kernel threads
+	logs       logsState
 
 	width, height int
 	containers    list
@@ -97,9 +105,16 @@ func (m Model) collect() tea.Cmd {
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.logs.active {
+			return m.updateLogsKey(msg)
+		}
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
+		case "enter":
+			if m.view == viewContainers {
+				return m.openLogs()
+			}
 		case "1":
 			m.view = viewContainers
 			return m, nil
@@ -119,7 +134,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.layout()
+		if m.logs.active {
+			m.layoutLogs()
+		}
 		return m, nil
+
+	case logsMsg:
+		return m.handleLogsMsg(msg)
 
 	case tickMsg:
 		// The timer always keeps running; a new collection only starts if the
@@ -166,11 +187,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// layout sizes the tables to the terminal. Screen rows: info line, tabs,
-// table, footer.
+// layout sizes the tables to the terminal.
 func (m *Model) layout() {
-	const chrome = 3
-	h := max(m.height-chrome, 4)
+	h := max(m.height-chromeLines, 4)
 	m.containers.cols = containerColumns(m.width)
 	m.containers.setSize(m.width, h)
 	m.processes.SetColumns(processColumns(m.width))
@@ -187,6 +206,14 @@ func (m *Model) refreshRows() {
 
 // View renders the whole screen.
 func (m Model) View() string {
+	if m.logs.active {
+		return lipgloss.JoinVertical(lipgloss.Left,
+			m.infoView(),
+			m.logsTitleView(),
+			m.logsBodyView(),
+			m.logsFooterView(),
+		)
+	}
 	return lipgloss.JoinVertical(lipgloss.Left,
 		m.infoView(),
 		m.tabsView(),
@@ -260,7 +287,7 @@ func (m Model) bodyView() string {
 // message renders a text block with the same height as the tables, so the
 // footer stays at the bottom.
 func (m Model) message(text string) string {
-	h := max(m.height-3, 4)
+	h := max(m.height-chromeLines, 4)
 	return lipgloss.NewStyle().Height(h).Render(emptyViewStyle.Width(max(m.width, 20)).Render(text))
 }
 
@@ -268,7 +295,7 @@ func (m Model) footerView() string {
 	if m.err != nil {
 		return errorStyle.Render(fmt.Sprintf(" refresh failed: %v", m.err))
 	}
-	keys := " 1/2 switch view · ↑/↓ scroll · q quit"
+	keys := " 1/2 switch view · ↑/↓ scroll · enter logs · q quit"
 	if m.view == viewProcesses {
 		state := "hidden"
 		if m.showKernel {

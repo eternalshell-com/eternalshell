@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -15,9 +16,9 @@ func fakeSnapshot() *collector.Snapshot {
 		CPUPercent: 6, CPUKnown: true, MemPercent: 33, Load1: 0.4, Load5: 0.3, Load15: 0.2,
 		Mounts: []collector.Mount{{Path: "/", UsedPercent: 84}},
 		Containers: []collector.Container{
-			{Name: "lienks-app-app-1", Project: "lienks-app", Service: "app", State: "running", Status: "Up 2 weeks (healthy)", CPU: 12, CPUKnown: true, MemBytes: 90 << 20, MemOK: true},
-			{Name: "lienks-app-cron-1", Project: "lienks-app", Service: "cron", State: "exited", Status: "Exited (143) 6 months ago", Restarts: 3},
-			{Name: "traefik", Image: "traefik:v3.1", State: "running", Status: "Up 6 weeks", CPU: 0, CPUKnown: true, MemBytes: 53 << 20, MemOK: true},
+			{ID: "id-app", Name: "lienks-app-app-1", Project: "lienks-app", Service: "app", State: "running", Status: "Up 2 weeks (healthy)", CPU: 12, CPUKnown: true, MemBytes: 90 << 20, MemOK: true},
+			{ID: "id-cron", Name: "lienks-app-cron-1", Project: "lienks-app", Service: "cron", State: "exited", Status: "Exited (143) 6 months ago", Restarts: 3},
+			{ID: "id-traefik", Name: "traefik", Image: "traefik:v3.1", State: "running", Status: "Up 6 weeks", CPU: 0, CPUKnown: true, MemBytes: 53 << 20, MemOK: true},
 		},
 		Processes: []collector.Process{
 			{PID: 48211, Name: "xmrig", CPU: 382, CPUKnown: true, RSS: 210 << 20,
@@ -346,5 +347,196 @@ func TestUnknownCPUShowsDash(t *testing.T) {
 	}
 	if got := processRows(snap.Processes, false)[0][2]; got != "-" {
 		t.Errorf("process CPU = %q, want -", got)
+	}
+}
+
+func enter(m Model) (Model, tea.Cmd) {
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	return next.(Model), cmd
+}
+
+func send(m Model, msg tea.Msg) Model {
+	next, _ := m.Update(msg)
+	return next.(Model)
+}
+
+func logLines(n int) string {
+	var b strings.Builder
+	for i := 1; i <= n; i++ {
+		fmt.Fprintf(&b, "2026-10-24T10:00:%02dZ line %d\n", i%60, i)
+	}
+	return b.String()
+}
+
+func TestEnterOpensLogs(t *testing.T) {
+	m := ready(t, fakeSnapshot())
+
+	m, cmd := enter(m)
+	if !m.logs.active || m.logs.id != "id-app" {
+		t.Fatalf("logs not opened for the first container: %+v", m.logs)
+	}
+	if cmd == nil {
+		t.Error("opening the logs should start a fetch command")
+	}
+	out := m.View()
+	for _, want := range []string{"Logs · lienks-app-app-1", "Loading logs", "esc back"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("loading screen missing %q:\n%s", want, out)
+		}
+	}
+
+	m = send(m, logsMsg{id: "id-app", text: logLines(5)})
+	out = m.View()
+	for _, want := range []string{"line 1", "line 5", "reload"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log screen missing %q:\n%s", want, out)
+		}
+	}
+	if m.logs.loading {
+		t.Error("loading should be over")
+	}
+}
+
+func TestLogsShowNewestAtBottomAndScroll(t *testing.T) {
+	m := ready(t, fakeSnapshot()) // 30 rows high: about 27 lines for the log
+	m, _ = enter(m)
+	m = send(m, logsMsg{id: "id-app", text: logLines(100)})
+
+	out := m.View()
+	if !strings.Contains(out, "line 100") || strings.Contains(out, "line 1\n") {
+		t.Errorf("should start at the bottom:\n%s", out)
+	}
+
+	m = send(m, tea.KeyMsg{Type: tea.KeyHome})
+	if out := m.View(); !strings.Contains(out, "line 1") || strings.Contains(out, "line 100") {
+		t.Errorf("home should jump to the top:\n%s", out)
+	}
+
+	m = send(m, tea.KeyMsg{Type: tea.KeyEnd})
+	if !strings.Contains(m.View(), "line 100") {
+		t.Error("end should jump back to the bottom")
+	}
+
+	m = send(m, tea.KeyMsg{Type: tea.KeyUp})
+	if strings.Count(m.View(), "\n")+1 != 30 {
+		t.Errorf("screen should always be exactly the window height, got %d lines", strings.Count(m.View(), "\n")+1)
+	}
+}
+
+func TestLogsEscGoesBack(t *testing.T) {
+	m := ready(t, fakeSnapshot())
+	m, _ = enter(m)
+	m = send(m, logsMsg{id: "id-app", text: "hello\n"})
+	m = send(m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.logs.active {
+		t.Fatal("esc should close the logs")
+	}
+	out := m.View()
+	if !strings.Contains(out, "[1 Containers]") || strings.Contains(out, "hello") {
+		t.Errorf("should be back on the containers view:\n%s", out)
+	}
+}
+
+func TestLogsReload(t *testing.T) {
+	m := ready(t, fakeSnapshot())
+	m, _ = enter(m)
+	m = send(m, logsMsg{id: "id-app", text: "old\n"})
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	m = next.(Model)
+	if !m.logs.loading || cmd == nil {
+		t.Fatal("r should start a reload")
+	}
+	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")}); cmd != nil {
+		t.Error("r during a running reload must not start another")
+	}
+
+	m = send(m, logsMsg{id: "id-app", text: "new\n"})
+	if out := m.View(); !strings.Contains(out, "new") || strings.Contains(out, "old") {
+		t.Errorf("reload should replace the text:\n%s", out)
+	}
+}
+
+func TestLogsStaleResultIgnored(t *testing.T) {
+	m := ready(t, fakeSnapshot())
+	m, _ = enter(m)
+	m = send(m, tea.KeyMsg{Type: tea.KeyEsc})
+	m = send(m, logsMsg{id: "id-app", text: "late\n"}) // arrives after going back
+	if m.logs.active || m.logs.text != "" {
+		t.Errorf("stale result changed the state: %+v", m.logs)
+	}
+
+	m, _ = enter(m)
+	m = send(m, logsMsg{id: "some-other", text: "wrong\n"})
+	if m.logs.text != "" {
+		t.Error("a result for another container must be ignored")
+	}
+}
+
+func TestLogsErrorAndEmpty(t *testing.T) {
+	m := ready(t, fakeSnapshot())
+	m, _ = enter(m)
+	m = send(m, logsMsg{id: "id-app", err: errors.New("permission denied")})
+	if !strings.Contains(m.View(), "Could not read the logs: permission denied") {
+		t.Errorf("error not shown:\n%s", m.View())
+	}
+
+	m = send(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	m = send(m, logsMsg{id: "id-app", text: ""})
+	if !strings.Contains(m.View(), "(no log output)") {
+		t.Errorf("empty logs should say so:\n%s", m.View())
+	}
+}
+
+func TestLogsKeysElsewhere(t *testing.T) {
+	m := ready(t, fakeSnapshot())
+
+	// Enter does nothing in the processes view
+	p := press(m, "2")
+	if p, _ = enter(p); p.logs.active {
+		t.Error("enter must not open logs in the processes view")
+	}
+
+	// Enter does nothing without containers
+	empty := fakeSnapshot()
+	empty.Containers = nil
+	e := ready(t, empty)
+	if e, _ = enter(e); e.logs.active {
+		t.Error("enter must not open logs without containers")
+	}
+
+	// q quits from the log screen
+	m, _ = enter(m)
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if cmd == nil {
+		t.Fatal("q should return a command")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Error("q should quit from the log screen")
+	}
+
+	// 2 leaves the log screen for the processes view
+	m = press(m, "2")
+	if m.logs.active || !strings.Contains(m.View(), "[2 Processes]") {
+		t.Error("2 should leave the logs and show processes")
+	}
+}
+
+func TestLogsSurviveRefreshAndResize(t *testing.T) {
+	m := ready(t, fakeSnapshot())
+	m, _ = enter(m)
+	m = send(m, logsMsg{id: "id-app", text: "keep me\n"})
+
+	m = send(m, snapshotMsg{snap: fakeSnapshot()}) // background refresh
+	m = send(m, tea.WindowSizeMsg{Width: 60, Height: 20})
+	if !m.logs.active || !strings.Contains(m.View(), "keep me") {
+		t.Errorf("logs should survive refresh and resize:\n%s", m.View())
+	}
+}
+
+func TestFooterMentionsLogs(t *testing.T) {
+	m := ready(t, fakeSnapshot())
+	if !strings.Contains(m.View(), "1/2 switch view · ↑/↓ scroll · enter logs · q quit") {
+		t.Errorf("footer:\n%s", m.View())
 	}
 }
