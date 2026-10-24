@@ -14,3 +14,5 @@
 # Local config (may contain private addresses; the example is tracked)
 /config.yaml
 /config.yml
+CLAUDE.md
+KONZEPT.md
