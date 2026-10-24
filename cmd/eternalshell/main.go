@@ -40,9 +40,9 @@ func runStatus() error {
 	}
 
 	fmt.Println("\nPROCESSES (top 5 by CPU, 100 % = one core)")
-	fmt.Printf("%-8s %-20s %7s %8s\n", "PID", "NAME", "CPU", "MEM")
+	fmt.Printf("%-8s %-20s %7s %8s  %s\n", "PID", "NAME", "CPU", "MEM", "ORIGIN")
 	for _, p := range collector.Top(snap.Processes, 5) {
-		fmt.Printf("%-8d %-20.20s %6.0f%% %8s\n", p.PID, p.Name, p.CPU, human(p.RSS))
+		fmt.Printf("%-8d %-20.20s %6.0f%% %8s  %s\n", p.PID, p.Name, p.CPU, human(p.RSS), p.Origin)
 	}
 	return nil
 }

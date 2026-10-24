@@ -21,6 +21,8 @@ type Process struct {
 	Name string
 	CPU  float64
 	RSS  uint64 // resident memory in bytes
+
+	Origin Origin // container, systemd service or host
 }
 
 // Mount describes a mounted filesystem.
@@ -112,6 +114,8 @@ func measure(procs []*process.Process, before map[int32]float64, interval time.D
 			Name: name,
 			CPU:  (a - b) / interval.Seconds() * 100,
 			RSS:  rss,
+
+			Origin: readOrigin(p.Pid),
 		})
 	}
 	sortByCPU(result)
