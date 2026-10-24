@@ -27,7 +27,9 @@ func main() {
 }
 
 func runStatus() error {
-	snap, err := collector.Collect(time.Second)
+	c := collector.New()
+	defer c.Close()
+	snap, err := c.Collect(time.Second)
 	if err != nil {
 		return err
 	}

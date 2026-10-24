@@ -3,6 +3,7 @@
 package collector
 
 import (
+	"context"
 	"sort"
 	"strings"
 	"time"
@@ -44,12 +45,47 @@ type Snapshot struct {
 	MemPercent float64
 	Mounts     []Mount
 	Processes  []Process // all readable processes, sorted by CPU descending
+
+	Containers []Container // empty if Docker is unreachable
+	DockerErr  error       // why Docker data is missing; not a failure of the snapshot
+}
+
+// Collector takes snapshots. It keeps state between snapshots (the Docker
+// client and its restart-count cache), so create it once and reuse it.
+type Collector struct {
+	docker *Docker
+}
+
+// New creates a Collector. It does not connect to Docker yet.
+func New() *Collector {
+	return &Collector{docker: newDocker()}
+}
+
+// Close releases the Docker client.
+func (c *Collector) Close() {
+	c.docker.close()
+}
+
+type dockerResult struct {
+	containers []Container
+	err        error
 }
 
 // Collect measures over the given interval (e.g. 1 s) and returns a snapshot.
 // CPU values are averages over this interval, not since process start.
-func Collect(interval time.Duration) (*Snapshot, error) {
+// If Docker is unreachable the snapshot is still returned, with DockerErr set.
+func (c *Collector) Collect(interval time.Duration) (*Snapshot, error) {
 	s := &Snapshot{}
+
+	// Ask Docker in a goroutine while we wait for the CPU measurement.
+	// A buffered channel lets the goroutine finish even if nobody receives.
+	dockerCh := make(chan dockerResult, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), dockerTimeout)
+		defer cancel()
+		cs, err := c.docker.list(ctx)
+		dockerCh <- dockerResult{cs, err}
+	}()
 
 	// First reading of every process's CPU time, then wait, then second reading.
 	procs, err := process.Processes()
@@ -68,6 +104,16 @@ func Collect(interval time.Duration) (*Snapshot, error) {
 	}
 
 	s.Processes = measure(procs, before, interval)
+
+	d := <-dockerCh // wait for the goroutine's answer
+	s.Containers, s.DockerErr = d.containers, d.err
+	attach(s.Processes, s.Containers)
+	for i := range s.Containers {
+		ct := &s.Containers[i]
+		if ct.Running() && ct.CgroupPath != "" {
+			ct.MemBytes, ct.MemOK = readMemUsage(cgroupBase, ct.CgroupPath)
+		}
+	}
 
 	if avg, err := load.Avg(); err == nil {
 		s.Load1, s.Load5, s.Load15 = avg.Load1, avg.Load5, avg.Load15

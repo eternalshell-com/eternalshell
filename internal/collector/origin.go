@@ -89,8 +89,8 @@ func (o Origin) String() string {
 	switch o.Kind {
 	case KindContainer:
 		switch {
-		case o.ContainerName != "" && o.Project != "":
-			return fmt.Sprintf("container %s/%s", o.Project, o.ContainerName)
+		case o.Project != "" && o.Service != "":
+			return fmt.Sprintf("container %s/%s", o.Project, o.Service)
 		case o.ContainerName != "":
 			return "container " + o.ContainerName
 		default:
