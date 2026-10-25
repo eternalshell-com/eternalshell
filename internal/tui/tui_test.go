@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -342,7 +343,7 @@ func TestUnknownCPUShowsDash(t *testing.T) {
 	}
 
 	m := ready(t, snap)
-	if !strings.Contains(m.View(), "▏    -") { // an empty bar and a dash
+	if !strings.Contains(m.View(), "▏   -") { // an empty bar and a dash
 		t.Errorf("header should show an unknown CPU as an empty bar and a dash:\n%s", m.View())
 	}
 	rows := containerRows(snap.Containers, nil, nil, nil)
@@ -597,33 +598,123 @@ func TestDiskColumn(t *testing.T) {
 	}
 }
 
-func TestDiskSummaryLine(t *testing.T) {
-	snap := fakeSnapshot()
-	m := ready(t, snap)
-	if !strings.Contains(m.View(), "measuring Docker disk usage") {
-		t.Errorf("before the first result:\n%s", m.View())
+func headerLine(view string) string {
+	return strings.TrimRight(strings.Split(view, "\n")[0], " ")
+}
+
+func TestDiskSummaryInTheHeader(t *testing.T) {
+	// no result yet: nothing about images, and no summary line under the table
+	m := ready(t, fakeSnapshot())
+	out := m.View()
+	if strings.Contains(headerLine(out), "images") || strings.Contains(out, "measuring Docker disk usage") {
+		t.Errorf("before the first result there is no summary:\n%s", out)
 	}
 
-	snap = fakeSnapshot()
+	// a result and a wide window: all three parts after the DISK bar
+	snap := fakeSnapshot()
 	snap.Disk = diskFixture()
-	m = ready(t, snap)
-	out := m.View()
-	for _, want := range []string{"images 12.0G", "build cache 4.0G", "reclaimable 2.0G", "DISK"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("view should contain %q:\n%s", want, out)
+	m = send(ready(t, snap), tea.WindowSizeMsg{Width: 200, Height: 30})
+	head := headerLine(m.View())
+	for _, want := range []string{"DISK ▕", "images 12.0G", "build cache 4.0G", "reclaimable 2.0G"} {
+		if !strings.Contains(head, want) {
+			t.Errorf("header should contain %q:\n%s", want, head)
 		}
 	}
+	if strings.Index(head, "DISK") > strings.Index(head, "images") {
+		t.Errorf("the summary comes after the DISK bar:\n%s", head)
+	}
+	if strings.Contains(m.View(), "disk: images") {
+		t.Errorf("the summary line under the table is gone:\n%s", m.View())
+	}
 
+	// build cache and reclaimable are only shown when above 0
+	snap = fakeSnapshot()
+	snap.Disk = diskFixture()
+	snap.Disk.BuildCache, snap.Disk.Reclaimable = 0, 0
+	m = send(ready(t, snap), tea.WindowSizeMsg{Width: 200, Height: 30})
+	head = headerLine(m.View())
+	if !strings.Contains(head, "images 12.0G") || strings.Contains(head, "build cache") || strings.Contains(head, "reclaimable") {
+		t.Errorf("only images when the rest is 0:\n%s", head)
+	}
+
+	// a failed refresh shows nothing in the header; the table says "-"
 	snap = fakeSnapshot()
 	snap.DiskErr = errors.New("docker not reachable")
 	m = ready(t, snap)
-	if !strings.Contains(m.View(), "Docker disk usage unavailable: docker not reachable") {
-		t.Errorf("failed refresh:\n%s", m.View())
+	if strings.Contains(headerLine(m.View()), "images") {
+		t.Errorf("no images figure without a result:\n%s", m.View())
+	}
+}
+
+func TestHeaderFitsNarrowTerminals(t *testing.T) {
+	snap := fakeSnapshot()
+	snap.Disk = diskFixture()
+	for _, width := range []int{200, 120, 100, 80, 70} {
+		m := send(ready(t, snap), tea.WindowSizeMsg{Width: width, Height: 30})
+		head := headerLine(m.View())
+		if n := utf8.RuneCountInString(head); n > width {
+			t.Errorf("width %d: header has %d cells:\n%s", width, n, head)
+		}
+		if width >= 80 && !strings.Contains(head, "images 12.0G") {
+			t.Errorf("width %d: images should still fit:\n%s", width, head)
+		}
+	}
+	// at 80 columns the extras and the load are gone, images are not
+	m := send(ready(t, snap), tea.WindowSizeMsg{Width: 80, Height: 30})
+	head := headerLine(m.View())
+	if strings.Contains(head, "build cache") || strings.Contains(head, "reclaimable") || strings.Contains(head, "load") {
+		t.Errorf("at 80 columns only the essentials fit:\n%s", head)
+	}
+}
+
+func TestGaugeFormat(t *testing.T) {
+	tests := []struct {
+		percent float64
+		known   bool
+		want    string
+	}{
+		{12, true, "CPU ▕█░░░░░░░▏ 12%"}, // exactly one space after the bar
+		{4, true, "CPU ▕░░░░░░░░▏  4%"},
+		{100, true, "CPU ▕████████▏100%"},
+		{0, false, "CPU ▕░░░░░░░░▏   -"},
+	}
+	for _, tt := range tests {
+		got := gauge("CPU", tt.percent, tt.known, 8)
+		if got != tt.want {
+			t.Errorf("gauge(%v, %v) = %q, want %q", tt.percent, tt.known, got, tt.want)
+		}
+		if n := utf8.RuneCountInString(got); n != utf8.RuneCountInString(tt.want) || n != 18 {
+			t.Errorf("gauge(%v) is %d cells wide; it must be the same for every value", tt.percent, n)
+		}
+	}
+}
+
+func TestSpacingAndSummaryLines(t *testing.T) {
+	m := ready(t, fakeSnapshot())
+	lines := strings.Split(m.View(), "\n")
+
+	if strings.TrimSpace(lines[1]) != "" || !strings.Contains(lines[2], "Containers") {
+		t.Errorf("an empty line between the header and the tabs:\n%s", strings.Join(lines[:4], "\n"))
+	}
+	if len(lines) != 30 {
+		t.Errorf("containers view: %d lines, want 30", len(lines))
+	}
+	// the last lines are the bottom edge of the box and the footer: no line in between
+	if !strings.HasPrefix(lines[len(lines)-2], "╰") || !strings.Contains(lines[len(lines)-1], "views") {
+		t.Errorf("the table is followed directly by the footer:\n%s", strings.Join(lines[len(lines)-3:], "\n"))
 	}
 
-	// the screen is always exactly as high as the window
-	if n := strings.Count(m.View(), "\n") + 1; n != 30 {
-		t.Errorf("screen has %d lines, want 30", n)
+	// the processes view also has no line under the table
+	p := press(m, "2")
+	if pl := strings.Split(p.View(), "\n"); len(pl) != 30 || !strings.HasPrefix(pl[len(pl)-2], "╰") {
+		t.Errorf("processes view: %d lines, last but one %q", len(pl), pl[len(pl)-2])
+	}
+
+	// the Domains view keeps its summary line under the box
+	d, _ := m.openDomains()
+	dl := strings.Split(d.(Model).View(), "\n")
+	if len(dl) != 30 || !strings.HasPrefix(dl[len(dl)-3], "╰") || !strings.Contains(dl[len(dl)-2], "domains:") {
+		t.Errorf("domains view: %d lines:\n%s", len(dl), strings.Join(dl[len(dl)-4:], "\n"))
 	}
 }
 

@@ -7,6 +7,7 @@ package tui
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -23,12 +24,14 @@ import (
 // this interval.
 const refreshEvery = 2 * time.Second
 
-// chromeLines are the screen rows around the table of the three main views: the
-// info line, the tabs, the top and bottom edge of the border, the summary line
-// and the footer. The log screen has no tabs, border or summary line.
+// chromeLines are the screen rows around the table of the main views: the
+// header, an empty line, the tabs, the top and bottom edge of the border and the
+// footer. The Domains view has one more line under the box (domainSummaryLines).
+// The log screen has none of this (logsChromeLines).
 const (
-	chromeLines     = 6
-	logsChromeLines = 3
+	chromeLines        = 6
+	domainSummaryLines = 1
+	logsChromeLines    = 3
 )
 
 // logLinesShown is the number of log lines requested; shown in the log title.
@@ -233,16 +236,22 @@ func (m *Model) activeList() *list {
 // innerWidth is the width inside the border.
 func (m Model) innerWidth() int { return max(m.width-2, 20) }
 
-// tableHeight is the height of the table inside the border.
-func (m Model) tableHeight() int { return max(m.height-chromeLines, 4) }
+// tableHeight is the height of the table inside the border in the given view.
+func (m Model) tableHeight(v view) int {
+	extra := 0
+	if v == viewDomains {
+		extra = domainSummaryLines
+	}
+	return max(m.height-chromeLines-extra, 4)
+}
 
 // layout sizes the tables to the terminal.
 func (m *Model) layout() {
-	w, h := m.innerWidth(), m.tableHeight()
+	w, h := m.innerWidth(), m.tableHeight(viewContainers)
 	m.containers.cols = containerColumns(w)
 	m.containers.setSize(w, h)
 	m.domainList.cols = domainColumns(w, domProjectMn) // refreshDomainRows sizes PROJECT to the names
-	m.domainList.setSize(w, h)
+	m.domainList.setSize(w, m.tableHeight(viewDomains))
 
 	// The rows of the bubbles table must match its columns, and the columns can
 	// change with the width (the trend column), so the rows are cleared first and
@@ -312,13 +321,16 @@ func (m Model) View() string {
 			m.logsFooterView(),
 		)
 	}
-	return lipgloss.JoinVertical(lipgloss.Left,
+	parts := []string{
 		m.infoView(),
+		"", // an empty line between the header and the tabs
 		m.tabsView(),
 		box(m.viewName(), m.bodyView(), m.innerWidth()),
-		m.diskSummaryView(),
-		m.footerView(),
-	)
+	}
+	if m.view == viewDomains {
+		parts = append(parts, m.domainSummaryView())
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, append(parts, m.footerView())...)
 }
 
 func (m Model) viewName() string {
@@ -349,9 +361,26 @@ func box(title, content string, innerW int) string {
 	return strings.Join(lines, "\n")
 }
 
-// infoView is the header: the title and three usage bars. It picks the widest
-// variant that fits the terminal: first the bars get narrower, then the load
-// and the host name are dropped.
+// headerVariant is one way to draw the header: how wide the bars are, whether
+// the host name and the load are shown, and how much of the Docker disk summary
+// (0 none, 1 images, 2 and build cache, 3 and reclaimable).
+type headerVariant struct {
+	bar        int
+	host, load bool
+	summary    int
+}
+
+// headerVariants are tried in this order, and the first that fits is used. The
+// summary parts go first (reclaimable, then build cache); then the bars get
+// narrower, then host and load go, and the images figure is the last to leave.
+var headerVariants = []headerVariant{
+	{10, true, true, 3}, {10, true, true, 2}, {10, true, true, 1},
+	{8, true, true, 1}, {6, true, true, 1}, {6, false, true, 1}, {6, false, false, 1}, {4, false, false, 1},
+	{4, false, false, 0},
+}
+
+// infoView is the header: the title, three usage bars and the Docker disk
+// summary. It picks the widest variant that fits the terminal.
 func (m Model) infoView() string {
 	if m.snap == nil {
 		s := " " + titleStyle.Render("EternalShell")
@@ -360,15 +389,9 @@ func (m Model) infoView() string {
 		}
 		return s + infoStyle.Render(" · collecting…")
 	}
-	variants := []struct {
-		bar        int
-		host, load bool
-	}{
-		{10, true, true}, {8, true, true}, {6, true, true}, {6, false, true}, {6, false, false}, {4, false, false},
-	}
 	var line string
-	for _, v := range variants {
-		line = m.headerLine(v.bar, v.host, v.load)
+	for _, v := range headerVariants {
+		line = m.headerLine(v)
 		if lipgloss.Width(line) <= m.width {
 			return line
 		}
@@ -376,38 +399,61 @@ func (m Model) infoView() string {
 	return lipgloss.NewStyle().MaxWidth(m.width).Render(line)
 }
 
-func (m Model) headerLine(barW int, host, load bool) string {
+func (m Model) headerLine(v headerVariant) string {
 	sep := infoStyle.Render(" · ")
 	s := " " + titleStyle.Render("EternalShell")
-	if host && m.host != "" {
+	if v.host && m.host != "" {
 		s += sep + infoStyle.Render(m.host)
 	}
 	n := m.snap
-	s += sep + gauge("CPU", n.CPUPercent, n.CPUKnown, barW)
-	s += sep + gauge("MEM", n.MemPercent, true, barW)
+	s += sep + gauge("CPU", n.CPUPercent, n.CPUKnown, v.bar)
+	s += sep + gauge("MEM", n.MemPercent, true, v.bar)
 	if root := rootMount(n.Mounts); root != nil {
-		s += sep + gauge("DISK", root.UsedPercent, true, barW)
+		s += sep + gauge("DISK", root.UsedPercent, true, v.bar)
 	}
-	if load {
+	for _, part := range diskSummary(n.Disk, v.summary) {
+		s += sep + infoStyle.Render(part)
+	}
+	if v.load {
 		s += sep + infoStyle.Render(fmt.Sprintf("load %.2f %.2f %.2f", n.Load1, n.Load5, n.Load15))
 	}
 	return s
 }
 
+// diskSummary returns the parts of the Docker disk summary for the header, up to
+// the given level: images, then build cache, then reclaimable. Build cache and
+// reclaimable only appear when there is something. Without a disk result there
+// is nothing to show.
+func diskSummary(u *collector.DiskUsage, level int) []string {
+	if u == nil || level < 1 {
+		return nil
+	}
+	parts := []string{"images " + format.Bytes(uint64(max(u.Images, 0)))}
+	if level >= 2 && u.BuildCache > 0 {
+		parts = append(parts, "build cache "+format.Bytes(uint64(u.BuildCache)))
+	}
+	if level >= 3 && u.Reclaimable > 0 {
+		parts = append(parts, "reclaimable "+format.Bytes(uint64(u.Reclaimable)))
+	}
+	return parts
+}
+
 // gauge draws "CPU ▕███░░░░░▏ 12%". The filled part has the color of the level
-// (green, yellow, red); an unknown value is an empty bar and a dash.
+// (green, yellow, red). The number is right-aligned in 3 characters right behind
+// the bar, so the field is always 4 wide and nothing after it moves; an unknown
+// value is an empty bar and a dash.
 func gauge(label string, percent float64, known bool, width int) string {
 	if !known {
 		percent = 0
 	}
 	filled, empty := bar(percent, width)
-	text := "-"
+	text := "   -"
 	if known {
-		text = format.Percent(percent)
+		text = fmt.Sprintf("%3.0f%%", math.Min(percent, 999))
 	}
 	return infoStyle.Render(label+" ▕") +
 		levelColor(barLevel(percent)).Render(filled) + dimStyle.Render(empty) +
-		infoStyle.Render("▏ "+fmt.Sprintf("%4s", text))
+		infoStyle.Render("▏"+text)
 }
 
 // rootMount returns the "/" mount, or the first mount if there is no "/".
@@ -482,28 +528,7 @@ func (m Model) bodyHeight() int {
 	if m.logs.active {
 		return max(m.height-logsChromeLines, 4)
 	}
-	return m.tableHeight()
-}
-
-// diskSummaryView is the one line under the table: in the Domains view the
-// domain summary, otherwise what Docker's disk use has that no container owns:
-// images, build cache and what could be reclaimed.
-func (m Model) diskSummaryView() string {
-	if m.view == viewDomains {
-		return m.domainSummaryView()
-	}
-	text := " disk: measuring Docker disk usage…"
-	switch {
-	case m.snap == nil:
-		text = " disk: collecting…"
-	case m.snap.Disk != nil:
-		u := m.snap.Disk
-		text = fmt.Sprintf(" disk: images %s · build cache %s · reclaimable %s",
-			format.Bytes(uint64(u.Images)), format.Bytes(uint64(u.BuildCache)), format.Bytes(uint64(u.Reclaimable)))
-	case m.snap.DiskErr != nil:
-		text = " disk: Docker disk usage unavailable: " + m.snap.DiskErr.Error()
-	}
-	return infoStyle.MaxWidth(max(m.width, 1)).Render(text)
+	return m.tableHeight(m.view)
 }
 
 // hint is one entry of the footer: a key and what it does.
