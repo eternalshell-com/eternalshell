@@ -12,6 +12,7 @@ import (
 	"eternalshell/internal/config"
 	"eternalshell/internal/format"
 	"eternalshell/internal/mail"
+	"eternalshell/internal/report"
 )
 
 // SendFunc sends one mail. mail.Send is the real one.
@@ -66,6 +67,9 @@ func Run(ctx context.Context, o Options) error {
 	pendingSince := map[int]time.Time{}
 	notesLogged := map[string]bool{}
 
+	rp := newReporter(ctx, cfg, lg)
+	rp.journal = report.NewJournal(time.Now())
+
 	ticker := time.NewTicker(Interval)
 	defer ticker.Stop()
 
@@ -88,12 +92,17 @@ func Run(ctx context.Context, o Options) error {
 			continue
 		}
 
+		tickAt := time.Now()
+		if snap.CPUKnown {
+			rp.journal.AddCPU(snap.CPUPercent, tickAt)
+		}
 		for _, n := range eng.Step(observe(snap, self)) {
 			level := "ALERT"
 			if n.Kind == KindClear {
 				level = "CLEAR"
 			}
 			lg.event(level, "%s", describe(n, known, snap))
+			rp.note(n, known, snap, tickAt)
 		}
 		remember(known, eng, snap)
 
@@ -106,7 +115,11 @@ func Run(ctx context.Context, o Options) error {
 					level = "CLEAR"
 				}
 				lg.event(level, "%s", describeDisk(n, snap))
+				rp.note(n, known, snap, tickAt)
 			}
+		}
+		for _, key := range eng.TakeSilentEnds() {
+			rp.journal.Cleared(journalKey(key), tickAt)
 		}
 
 		now := time.Now()
@@ -130,6 +143,8 @@ func Run(ctx context.Context, o Options) error {
 			lg.event("INFO", "mail sent: %s", noticeLabel(n))
 		}
 		forget(known, eng)
+
+		rp.tick(ctx, o, send, snap, time.Now())
 	}
 }
 

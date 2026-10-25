@@ -321,3 +321,44 @@ func TestLoad(t *testing.T) {
 		t.Error("missing file must be an error")
 	}
 }
+
+func TestReportDefaultsAndParsing(t *testing.T) {
+	// absent: off, but with usable defaults
+	cfg := mustParse(t, "")
+	r := cfg.Alerts.Report
+	if r.Enabled || r.Schedule != "daily" || r.Weekday != "monday" || r.Time != "08:00" {
+		t.Errorf("defaults = %+v", r)
+	}
+
+	cfg = mustParse(t, "alerts:\n  report:\n    enabled: true\n    schedule: weekly\n    weekday: Fri\n    time: \"06:30\"\n")
+	r = cfg.Alerts.Report
+	if !r.Enabled || r.Schedule != "weekly" || r.Weekday != "Fri" || r.Time != "06:30" {
+		t.Errorf("parsed = %+v", r)
+	}
+}
+
+func TestReportValidation(t *testing.T) {
+	bad := map[string]string{
+		"alerts.report.schedule": "alerts:\n  report: {schedule: monthly}\n",
+		"alerts.report.weekday":  "alerts:\n  report: {schedule: weekly, weekday: someday}\n",
+		"alerts.report.time":     "alerts:\n  report: {time: \"8am\"}\n",
+	}
+	for want, y := range bad {
+		if _, err := Parse(strings.NewReader(y)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: error = %v", want, err)
+		}
+	}
+	for _, tm := range []string{"24:00", "08:60", "8:00", "08:0", "0800", ""} {
+		if _, _, err := ParseClock(tm); err == nil {
+			t.Errorf("ParseClock(%q) should fail", tm)
+		}
+	}
+	if h, m, err := ParseClock("23:59"); err != nil || h != 23 || m != 59 {
+		t.Errorf("ParseClock(23:59) = %d:%d, %v", h, m, err)
+	}
+	for in, want := range map[string]time.Weekday{"monday": time.Monday, "Mon": time.Monday, "SUNDAY": time.Sunday, " sat ": time.Saturday} {
+		if got, err := ParseWeekday(in); err != nil || got != want {
+			t.Errorf("ParseWeekday(%q) = %v, %v", in, got, err)
+		}
+	}
+}

@@ -54,20 +54,10 @@ type domainHost struct {
 // once. The first container in the list wins, which is the order of the
 // containers view.
 func domainHosts(cs []collector.Container) []domainHost {
-	seen := map[string]bool{}
-	var out []domainHost
-	for _, c := range cs {
-		for _, h := range c.Hosts {
-			if seen[h] {
-				continue
-			}
-			seen[h] = true
-			project := c.Project
-			if project == "" {
-				project = c.Name
-			}
-			out = append(out, domainHost{Host: h, Project: project})
-		}
+	owners := collector.HostOwners(cs)
+	out := make([]domainHost, len(owners))
+	for i, o := range owners {
+		out[i] = domainHost{Host: o.Host, Project: o.Project}
 	}
 	return out
 }

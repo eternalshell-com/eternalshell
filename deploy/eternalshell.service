@@ -76,8 +76,13 @@ LockPersonality=yes
 SystemCallArchitectures=native
 UMask=0077
 
-# No write access anywhere: the watcher keeps its state in memory only.
-# (When an event log is added later, StateDirectory=eternalshell goes here.)
+# The one place the service may write: /var/lib/eternalshell, created by
+# systemd for the service user and also writable under ProtectSystem=strict.
+# It holds a small JSON file with the figures of the last status report, so the
+# next report can say what changed. Everything else stays in memory.
+# The service also finds it through $STATE_DIRECTORY.
+StateDirectory=eternalshell
+StateDirectoryMode=0750
 
 [Install]
 WantedBy=multi-user.target

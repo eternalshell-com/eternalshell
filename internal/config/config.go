@@ -40,8 +40,17 @@ type Server struct {
 
 // Alerts holds the thresholds of the three alerts.
 type Alerts struct {
-	CPU  CPUAlerts `yaml:"cpu"`
-	Disk DiskAlert `yaml:"disk"`
+	CPU    CPUAlerts `yaml:"cpu"`
+	Disk   DiskAlert `yaml:"disk"`
+	Report Report    `yaml:"report"`
+}
+
+// Report is the periodic status mail ("all OK / this changed").
+type Report struct {
+	Enabled  bool   `yaml:"enabled"`
+	Schedule string `yaml:"schedule"` // daily or weekly
+	Weekday  string `yaml:"weekday"`  // only used for weekly, e.g. monday
+	Time     string `yaml:"time"`     // HH:MM, server local time
 }
 
 // CPUAlerts: one process above a threshold, or the whole server.
@@ -81,7 +90,8 @@ func Default() Config {
 				Process: Threshold{Percent: 80, Duration: 15 * time.Minute},
 				Total:   Threshold{Percent: 90, Duration: 10 * time.Minute},
 			},
-			Disk: DiskAlert{Percent: 90},
+			Disk:   DiskAlert{Percent: 90},
+			Report: Report{Enabled: false, Schedule: "daily", Weekday: "monday", Time: "08:00"},
 		},
 		SMTP: SMTP{Port: 587},
 	}
@@ -225,7 +235,44 @@ func (c *Config) Validate() error {
 	}
 	check(validPercent(c.Alerts.Disk.Percent), "alerts.disk.percent must be between 1 and 100, got %v", c.Alerts.Disk.Percent)
 
+	// The report settings are checked even when the report is off, so a typo
+	// does not wait until someone turns it on.
+	r := c.Alerts.Report
+	switch strings.ToLower(strings.TrimSpace(r.Schedule)) {
+	case "daily", "weekly":
+	default:
+		errs = append(errs, fmt.Errorf("alerts.report.schedule must be daily or weekly, got %q", r.Schedule))
+	}
+	if _, err := ParseWeekday(r.Weekday); err != nil {
+		errs = append(errs, fmt.Errorf("alerts.report.weekday: %w", err))
+	}
+	if _, _, err := ParseClock(r.Time); err != nil {
+		errs = append(errs, fmt.Errorf("alerts.report.time: %w", err))
+	}
+
 	return errors.Join(errs...)
+}
+
+// ParseClock reads a time of day written as HH:MM (24 hours, for example "08:00").
+func ParseClock(s string) (hour, minute int, err error) {
+	t, err := time.Parse("15:04", strings.TrimSpace(s))
+	if err != nil || len(strings.TrimSpace(s)) != 5 {
+		return 0, 0, fmt.Errorf("must be a time like \"08:00\" (HH:MM, 24 hours), got %q", s)
+	}
+	return t.Hour(), t.Minute(), nil
+}
+
+// ParseWeekday reads an English weekday name, in full or as three letters,
+// in any case ("monday", "Mon").
+func ParseWeekday(s string) (time.Weekday, error) {
+	name := strings.ToLower(strings.TrimSpace(s))
+	for d := time.Sunday; d <= time.Saturday; d++ {
+		full := strings.ToLower(d.String())
+		if name == full || name == full[:3] {
+			return d, nil
+		}
+	}
+	return 0, fmt.Errorf("must be a weekday like \"monday\", got %q", s)
 }
 
 // ValidateSMTP checks what is needed to send mail. It is separate from Validate

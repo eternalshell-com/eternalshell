@@ -21,6 +21,18 @@ alerts:
   # mount is at least this full, one all-clear when it is 2 points below.
   disk: { percent: 90 }
 
+  # A calm status mail ("all OK" or "N things need attention") with the disk
+  # use per project and what changed since the last one. `watch` sends it on
+  # schedule; `eternalshell report` shows it, `eternalshell report --send` mails
+  # it now. It also sends one GET to each of your domains (the hosts of your
+  # Traefik labels) to check them.
+  # When the block is missing the report is off.
+  report:
+    enabled: true
+    schedule: daily        # daily | weekly
+    weekday: monday        # only for weekly
+    time: "08:00"          # server local time
+
 smtp:
   host: smtp.example.com
   port: 587               # 465 = implicit TLS, any other port = STARTTLS (required)

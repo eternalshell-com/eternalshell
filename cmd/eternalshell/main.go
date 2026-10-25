@@ -18,6 +18,7 @@ import (
 	"eternalshell/internal/config"
 	"eternalshell/internal/format"
 	"eternalshell/internal/mail"
+	"eternalshell/internal/report"
 	"eternalshell/internal/tui"
 	"eternalshell/internal/watch"
 )
@@ -34,6 +35,14 @@ Commands:
   test-mail [--config path]
             send one test mail with the smtp settings from the config file
             (default: /etc/eternalshell/config.yaml, then ./config.yaml)
+  report [--send] [--config path]
+            print the status report (what needs attention, disk use, what
+            changed since the last report); --send mails it now and saves the
+            state for the next comparison. The CPU and alert parts only exist
+            in the reports of the running watcher. The state is kept in
+            $STATE_DIRECTORY, else ~/.local/state/eternalshell; to count as the
+            watcher's report, run --send as its user with
+            STATE_DIRECTORY=/var/lib/eternalshell
 `
 
 func main() {
@@ -47,6 +56,8 @@ func main() {
 		err = runTestMail(os.Args[2:])
 	case os.Args[1] == "watch":
 		err = runWatch(os.Args[2:])
+	case os.Args[1] == "report":
+		err = runReport(os.Args[2:])
 	default:
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
@@ -106,8 +117,13 @@ func loadMailConfig(command string, args []string) (*config.Config, string, erro
 	if fs.NArg() > 0 {
 		return nil, "", fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
+	return mailConfig(*configPath)
+}
 
-	path, err := config.Find(*configPath)
+// mailConfig finds, loads and checks the config for a command that sends mail
+// and reads the SMTP password from the environment.
+func mailConfig(explicit string) (*config.Config, string, error) {
+	path, err := config.Find(explicit)
 	if err != nil {
 		return nil, "", err
 	}
@@ -166,4 +182,93 @@ func runWatch(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return watch.Run(ctx, watch.Options{Config: cfg, Password: password, Collector: c, Out: os.Stdout})
+}
+
+// optionalConfig loads the config for a command that can run without one: an
+// explicit path must exist, otherwise the usual places are tried and the
+// defaults are used if there is no file.
+func optionalConfig(explicit string) (*config.Config, error) {
+	path, err := config.Find(explicit)
+	if err != nil {
+		if explicit != "" {
+			return nil, err
+		}
+		def := config.Default()
+		fmt.Fprintln(os.Stderr, "No config file found, using the defaults.")
+		return &def, nil
+	}
+	fmt.Fprintln(os.Stderr, "Config:", path)
+	return config.Load(path)
+}
+
+// runReport prints the status report, or mails it with --send.
+func runReport(args []string) error {
+	fs := flag.NewFlagSet("report", flag.ContinueOnError)
+	configPath := fs.String("config", "", "path to the config file")
+	sendMail := fs.Bool("send", false, "mail the report now and save the state")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+
+	var cfg *config.Config
+	var password string
+	var err error
+	if *sendMail {
+		cfg, password, err = mailConfig(*configPath)
+	} else {
+		cfg, err = optionalConfig(*configPath)
+	}
+	if err != nil {
+		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	col := collector.New()
+	defer col.Close()
+	waitCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	snap, err := report.CollectSnapshot(waitCtx, col, os.Stderr)
+	cancel()
+	if err != nil {
+		return err
+	}
+
+	prev, err := report.LoadState()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "warning:", err)
+	}
+	fmt.Fprintln(os.Stderr, "Checking the domains...")
+	d := report.Build(ctx, report.Input{Snap: snap, Config: cfg, Prev: prev, Now: time.Now()})
+	subject, body := report.Render(d)
+
+	if !*sendMail {
+		fmt.Println("Subject:", subject)
+		fmt.Println()
+		fmt.Print(body)
+		return nil
+	}
+
+	s := cfg.SMTP
+	fmt.Printf("Sending the report to %s via %s:%d (%s)...\n",
+		strings.Join(s.To, ", "), s.Host, s.Port, mail.TransportFor(s.Port))
+	if err := mail.Send(ctx, s, password, mail.Message{Subject: subject, Body: body}); err != nil {
+		return errors.New(mail.Explain(err, s))
+	}
+	fmt.Println("OK: the mail server accepted the report:", subject)
+
+	st := report.SnapshotState(d)
+	if err := st.Save(); err != nil {
+		fmt.Fprintln(os.Stderr, "warning: the state could not be saved:", err)
+		return nil
+	}
+	fmt.Println("State saved to", report.StatePath())
+	if os.Getenv("STATE_DIRECTORY") == "" {
+		fmt.Println("Note: the watcher keeps its own state (STATE_DIRECTORY, normally /var/lib/eternalshell); " +
+			"this report does not count as its last one.")
+	}
+	return nil
 }

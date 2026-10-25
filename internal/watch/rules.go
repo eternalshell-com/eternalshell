@@ -107,6 +107,7 @@ type Engine struct {
 	diskPct  float64
 	pending  []Notice // not sent yet, oldest first
 	created  []Notice // made by the current Step
+	silent   []Key    // incidents that ended before their alert mail was sent
 	nextID   int
 }
 
@@ -188,6 +189,7 @@ func (e *Engine) StepDisk(mounts []MountSample) []Notice {
 func (e *Engine) endDisk(key Key, t *diskTracker, reason Reason) {
 	t.active = false
 	if e.drop(t.alertID) {
+		e.silent = append(e.silent, key)
 		return
 	}
 	e.add(Notice{
@@ -299,6 +301,7 @@ func (e *Engine) end(key Key, t *tracker, reason Reason) {
 	t.samples = nil // the window has to fill again before the next alert
 
 	if e.drop(t.alertID) {
+		e.silent = append(e.silent, key)
 		return
 	}
 	e.add(Notice{
@@ -306,6 +309,15 @@ func (e *Engine) end(key Key, t *tracker, reason Reason) {
 		Threshold: t.th.Percent, Window: t.th.Duration,
 		Lasted: time.Duration(t.steps) * e.interval, Reason: reason,
 	})
+}
+
+// TakeSilentEnds returns the incidents that ended before their alert mail was
+// sent, so nobody was told about either end, and forgets them. The status
+// report's journal needs them to close the alerts it noted.
+func (e *Engine) TakeSilentEnds() []Key {
+	out := e.silent
+	e.silent = nil
+	return out
 }
 
 // Pending returns the notices that still have to be sent, oldest first.

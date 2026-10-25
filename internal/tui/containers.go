@@ -2,10 +2,8 @@ package tui
 
 import (
 	"fmt"
-	"regexp"
 	"sort"
 	"strconv"
-	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -91,18 +89,8 @@ func containerColumns(width int) []listColumn {
 	}
 }
 
-var exitedRe = regexp.MustCompile(`^Exited \((\d+)\)`)
-
 // exitCode extracts the exit code from a Docker status like "Exited (143) 6 months ago".
-// ok is false if the status is not an "Exited" status.
-func exitCode(status string) (code int, ok bool) {
-	m := exitedRe.FindStringSubmatch(status)
-	if m == nil {
-		return 0, false
-	}
-	n, err := strconv.Atoi(m[1])
-	return n, err == nil
-}
+func exitCode(status string) (code int, ok bool) { return collector.ExitCode(status) }
 
 // problem reports whether a container deserves attention:
 //   - running: restarted before, or using at least a full core's 80 %
@@ -263,9 +251,7 @@ const (
 )
 
 // health reads the health state out of a Docker status like "Up 2 weeks (healthy)".
-func health(status string) (healthy, unhealthy bool) {
-	return strings.Contains(status, "(healthy)"), strings.Contains(status, "(unhealthy)")
-}
+func health(status string) (healthy, unhealthy bool) { return collector.Health(status) }
 
 // containerDot decides the kind of dot for a container and whether it gets a
 // check mark. "Exited badly" is the same rule as for the problem marker: an exit
