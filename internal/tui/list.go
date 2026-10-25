@@ -23,6 +23,10 @@ type listRow struct {
 	dim    bool   // stopped container
 	warn   bool   // group header with a problem inside
 	id     string // container ID, empty for headers
+
+	// styles colors single cells (nil entries stay plain). They are applied to
+	// the already padded cell text, so the column widths stay right.
+	styles []*lipgloss.Style
 }
 
 type list struct {
@@ -32,6 +36,8 @@ type list struct {
 	offset int // first visible row
 	width  int
 	height int // total height including the 2 header lines
+
+	plain bool // no highlight for the cursor row (scrolling still follows it)
 }
 
 const listHeaderLines = 2
@@ -137,6 +143,11 @@ func (l *list) bottom() { l.cursor = len(l.rows) - 1; l.fixCursor(-1) }
 
 // line joins cells into one text line with fixed column widths.
 func (l *list) line(cells []string) string {
+	return " " + strings.Join(l.pad(cells), "  ")
+}
+
+// pad cuts every cell to its column width and fills it up with spaces.
+func (l *list) pad(cells []string) []string {
 	parts := make([]string, len(l.cols))
 	for i, c := range l.cols {
 		text := ""
@@ -144,6 +155,17 @@ func (l *list) line(cells []string) string {
 			text = cells[i]
 		}
 		parts[i] = runewidth.FillRight(runewidth.Truncate(text, c.width, "…"), c.width)
+	}
+	return parts
+}
+
+// styledLine is line with the cell colors of a row.
+func (l *list) styledLine(r listRow) string {
+	parts := l.pad(r.cells)
+	for i := range parts {
+		if i < len(r.styles) && r.styles[i] != nil {
+			parts[i] = r.styles[i].Render(parts[i])
+		}
 	}
 	return " " + strings.Join(parts, "  ")
 }
@@ -167,8 +189,13 @@ func (l *list) view() string {
 		}
 		r := l.rows[idx]
 		text := l.line(r.cells)
+		if len(r.styles) > 0 {
+			text = l.styledLine(r)
+		}
 		switch {
-		case idx == l.cursor && !r.header:
+		case len(r.styles) > 0:
+			// colored cells: no whole-line style, it would reset the cell colors
+		case idx == l.cursor && !r.header && !l.plain:
 			text = selectedStyle.Render(text)
 		case r.header && r.warn:
 			text = headerWarnStyle.Render(text)

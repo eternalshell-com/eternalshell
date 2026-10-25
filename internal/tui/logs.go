@@ -67,6 +67,9 @@ func (m Model) updateLogsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.logs.active, m.view = false, viewContainers
 	case "2":
 		m.logs.active, m.view = false, viewProcesses
+	case "3":
+		m.logs.active = false
+		return m.openDomains()
 	case "r":
 		if m.logs.loading {
 			return m, nil

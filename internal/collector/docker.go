@@ -11,6 +11,8 @@ import (
 
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
+
+	"eternalshell/internal/domains"
 )
 
 const (
@@ -38,6 +40,7 @@ type Container struct {
 	State    string // running, exited, restarting, ...
 	Status   string // human text from Docker, e.g. "Up 2 weeks (healthy)"
 	Restarts int
+	Hosts    []string // domains from Traefik router rules in its labels
 
 	CPU        float64 // sum of its processes' CPU, 100 = one core
 	CPUKnown   bool    // false until at least one of its processes has a CPU value
@@ -133,6 +136,7 @@ func fromSummary(s container.Summary) Container {
 		Image:   shortImage(s.Image),
 		State:   string(s.State),
 		Status:  s.Status,
+		Hosts:   domains.HostsFromLabels(s.Labels),
 	}
 }
 

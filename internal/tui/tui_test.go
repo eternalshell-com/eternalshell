@@ -536,7 +536,7 @@ func TestLogsSurviveRefreshAndResize(t *testing.T) {
 
 func TestFooterMentionsLogs(t *testing.T) {
 	m := ready(t, fakeSnapshot())
-	if !strings.Contains(m.View(), "1/2 switch view · ↑/↓ scroll · enter logs · q quit") {
+	if !strings.Contains(m.View(), "1/2/3 switch view · ↑/↓ scroll · enter logs · q quit") {
 		t.Errorf("footer:\n%s", m.View())
 	}
 }

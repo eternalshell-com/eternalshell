@@ -34,6 +34,7 @@ type view int
 const (
 	viewContainers view = iota
 	viewProcesses
+	viewDomains
 )
 
 // Messages that Update can receive besides key presses.
@@ -57,10 +58,12 @@ type Model struct {
 
 	showKernel bool // processes view: include kernel threads
 	logs       logsState
+	domains    domainsState
 
 	width, height int
 	containers    list
 	processes     table.Model
+	domainList    list
 }
 
 // New creates the UI. Collection starts when the program runs (Init).
@@ -121,6 +124,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "2":
 			m.view = viewProcesses
 			return m, nil
+		case "3":
+			return m.openDomains()
 		case "k":
 			if m.view == viewProcesses {
 				m.showKernel = !m.showKernel
@@ -141,6 +146,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case logsMsg:
 		return m.handleLogsMsg(msg)
+
+	case domainsMsg:
+		m.domains.running = false
+		m.domains.results, m.domains.checkedAt = msg.results, msg.at
+		m.refreshDomainRows()
+		return m, nil
+
+	case recheckMsg:
+		// The timer keeps running; a check only starts while the view is shown.
+		cmds := []tea.Cmd{scheduleRecheck()}
+		if m.view == viewDomains {
+			cmds = append(cmds, m.startDomainCheck(time.Now()))
+		}
+		return m, tea.Batch(cmds...)
 
 	case tickMsg:
 		// The timer always keeps running; a new collection only starts if the
@@ -163,21 +182,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	// Anything else (arrow keys, page up/down) scrolls the visible table.
-	if m.view == viewContainers {
+	if l := m.activeList(); l != nil {
 		if k, ok := msg.(tea.KeyMsg); ok {
 			switch k.String() {
 			case "up":
-				m.containers.move(-1)
+				l.move(-1)
 			case "down":
-				m.containers.move(1)
+				l.move(1)
 			case "pgup":
-				m.containers.page(-1)
+				l.page(-1)
 			case "pgdown":
-				m.containers.page(1)
+				l.page(1)
 			case "home":
-				m.containers.top()
+				l.top()
 			case "end":
-				m.containers.bottom()
+				l.bottom()
 			}
 		}
 		return m, nil
@@ -187,11 +206,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// activeList returns the list of the current view, or nil for the processes
+// view, which uses the bubbles table.
+func (m *Model) activeList() *list {
+	switch m.view {
+	case viewContainers:
+		return &m.containers
+	case viewDomains:
+		return &m.domainList
+	}
+	return nil
+}
+
 // layout sizes the tables to the terminal.
 func (m *Model) layout() {
 	h := max(m.height-chromeLines, 4)
 	m.containers.cols = containerColumns(m.width)
 	m.containers.setSize(m.width, h)
+	m.domainList.plain = true
+	m.domainList.cols = domainColumns(m.width)
+	m.domainList.setSize(m.width, h)
 	m.processes.SetColumns(processColumns(m.width))
 	m.processes.SetHeight(h)
 	m.processes.SetWidth(m.width)
@@ -200,6 +234,7 @@ func (m *Model) layout() {
 func (m *Model) refreshRows() {
 	m.containers.setRows(containerRows(m.snap.Containers, m.snap.Disk, m.snap.DiskErr))
 	m.processes.SetRows(processRows(m.snap.Processes, m.showKernel))
+	m.refreshDomainRows()
 	// Rows can shrink between refreshes; re-set the cursor so it is clamped.
 	m.processes.SetCursor(m.processes.Cursor())
 }
@@ -264,10 +299,19 @@ func (m Model) tabsView() string {
 		}
 		return tabInactive.Render(" " + label + " ")
 	}
-	return " " + tab("1 Containers", viewContainers) + " " + tab("2 Processes", viewProcesses)
+	return " " + tab("1 Containers", viewContainers) + " " + tab("2 Processes", viewProcesses) + " " + tab("3 Domains", viewDomains)
 }
 
 func (m Model) bodyView() string {
+	if m.view == viewDomains {
+		switch {
+		case m.snap == nil:
+			return m.message("Collecting…")
+		case len(domainHosts(m.snap.Containers)) == 0:
+			return m.message("No domains found.\n\nThis view lists the hosts of Traefik router rules, from container labels such as\n  traefik.http.routers.<name>.rule=Host(`app.example.com`)")
+		}
+		return m.domainList.view()
+	}
 	if m.view == viewProcesses {
 		if m.snap == nil {
 			return m.message("Collecting…")
@@ -303,6 +347,9 @@ func (m Model) bodyHeight() int {
 // diskSummaryView is the one line about Docker's disk use that is not part of
 // any container: images, build cache and what could be reclaimed.
 func (m Model) diskSummaryView() string {
+	if m.view == viewDomains {
+		return m.domainSummaryView()
+	}
 	text := " disk: measuring Docker disk usage…"
 	switch {
 	case m.snap == nil:
@@ -321,13 +368,16 @@ func (m Model) footerView() string {
 	if m.err != nil {
 		return errorStyle.Render(fmt.Sprintf(" refresh failed: %v", m.err))
 	}
-	keys := " 1/2 switch view · ↑/↓ scroll · enter logs · q quit"
+	keys := " 1/2/3 switch view · ↑/↓ scroll · enter logs · q quit"
+	if m.view == viewDomains {
+		keys = " 1/2/3 switch view · ↑/↓ scroll · q quit"
+	}
 	if m.view == viewProcesses {
 		state := "hidden"
 		if m.showKernel {
 			state = "shown"
 		}
-		keys = " 1/2 switch view · ↑/↓ scroll · k kernel threads (" + state + ") · q quit"
+		keys = " 1/2/3 switch view · ↑/↓ scroll · k kernel threads (" + state + ") · q quit"
 	}
 	return footerStyle.Render(keys)
 }
