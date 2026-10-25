@@ -123,3 +123,38 @@ func TestScheduleString(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+// The watcher has no previous report on its first start. It passes its start
+// time as the last report, so the first scheduled time after the start is due.
+func TestDueWithTheWatcherStartAsLastReport(t *testing.T) {
+	s := daily(15, 52)
+	start := at(2026, 10, 25, 15, 40)
+
+	if s.Due(start, at(2026, 10, 25, 15, 51)) {
+		t.Error("not due before the first scheduled time")
+	}
+	if !s.Due(start, at(2026, 10, 25, 15, 52)) {
+		t.Error("due exactly at the first scheduled time after the start")
+	}
+	if !s.Due(start, at(2026, 10, 25, 15, 55)) {
+		t.Error("still due a few minutes later, until the report was sent")
+	}
+
+	// once it was sent, it is not due again before the next scheduled time
+	sent := at(2026, 10, 25, 15, 55)
+	if s.Due(sent, at(2026, 10, 25, 16, 0)) || s.Due(sent, at(2026, 10, 26, 15, 51)) {
+		t.Error("must not be due again after the first report")
+	}
+	if !s.Due(sent, at(2026, 10, 26, 15, 52)) {
+		t.Error("due again at the next scheduled time")
+	}
+
+	// started after today's time: the first report is tomorrow
+	late := at(2026, 10, 25, 16, 30)
+	if s.Due(late, at(2026, 10, 25, 23, 0)) {
+		t.Error("started after today's scheduled time: not due again today")
+	}
+	if !s.Due(late, at(2026, 10, 26, 15, 52)) {
+		t.Error("started after today's scheduled time: due tomorrow")
+	}
+}

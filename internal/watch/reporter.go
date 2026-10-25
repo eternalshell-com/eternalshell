@@ -63,6 +63,11 @@ func newReporter(ctx context.Context, cfg *config.Config, lg logger) *reporter {
 		r.lastReport = prev.Time
 		lg.event("INFO", "report: %s, previous report %s, next at %s", sched, prev.Time.Format(time.RFC3339), sched.NextRun(now).Format(time.RFC3339))
 	} else {
+		// Without a previous report the start of the watcher stands in as "the
+		// last report", so the first scheduled time after the start is due
+		// (Schedule.Due is never true for a zero time). r.prev stays nil: the
+		// report still says that there is nothing to compare with.
+		r.lastReport = now
 		lg.event("INFO", "report: %s, no previous report yet, the first one is sent at %s", sched, sched.NextRun(now).Format(time.RFC3339))
 	}
 	return r

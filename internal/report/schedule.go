@@ -93,8 +93,9 @@ func (s Schedule) NextRun(now time.Time) time.Time {
 // Due reports whether a report has to be sent now: the last scheduled time has
 // passed and no report was made since. This also catches a missed time (the
 // watcher was down at 08:00 and starts at 09:30) and never fires twice for the
-// same time. Without a previous report (lastReport is zero) nothing is due; the
-// first report then comes at the next scheduled time.
+// same time. A zero lastReport means "unknown" and is never due: a caller with
+// no previous report passes the time it started instead (the watcher does), so
+// the first report comes at the next scheduled time after that.
 func (s Schedule) Due(lastReport, now time.Time) bool {
 	return !lastReport.IsZero() && lastReport.Before(s.LastDue(now))
 }
