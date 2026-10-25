@@ -21,18 +21,20 @@ const (
 	statusW   = 26
 	cpuW      = 6
 	memW      = 8
+	diskW     = 9
 	restartsW = 8
 	colGap    = 2
 	cellPad   = 2 // padding the bubbles table adds per column (processes view)
 )
 
 func containerColumns(width int) []listColumn {
-	fixed := statusW + cpuW + memW + restartsW + 4*colGap + 1
+	fixed := statusW + cpuW + memW + diskW + restartsW + 5*colGap + 1
 	return []listColumn{
 		{"PROJECT / CONTAINER", max(width-fixed, 20)},
 		{"STATUS", statusW},
 		{"CPU", cpuW},
 		{"MEM", memW},
+		{"DISK", diskW},
 		{"RESTARTS", restartsW},
 	}
 }
@@ -126,23 +128,60 @@ func groupContainers(cs []collector.Container) []group {
 	return out
 }
 
-// containerRows builds the list rows: a header row per group, then its containers.
-func containerRows(cs []collector.Container) []listRow {
+// containerRows builds the list rows: a header row per group, then its
+// containers. disk is the latest Docker disk usage (nil until the first
+// background result, then the DISK cells show "…" or "-" if it failed).
+func containerRows(cs []collector.Container, disk *collector.DiskUsage, diskErr error) []listRow {
 	var rows []listRow
 	for _, g := range groupContainers(cs) {
 		title := g.name
 		if g.problem {
 			title += " !"
 		}
-		rows = append(rows, listRow{cells: []string{title}, header: true, warn: g.problem})
+		rows = append(rows, listRow{cells: []string{title, "", "", "", groupDiskCell(g, disk, diskErr)}, header: true, warn: g.problem})
 		for _, c := range g.containers {
-			rows = append(rows, containerRow(c))
+			rows = append(rows, containerRow(c, diskCell(c.ID, disk, diskErr)))
 		}
 	}
 	return rows
 }
 
-func containerRow(c collector.Container) listRow {
+// diskCell is the DISK text of one container: layers + volumes + bind mounts +
+// logs. "+?" marks a figure that is incomplete (for example the log files of a
+// normal user, who cannot read /var/lib/docker).
+func diskCell(id string, disk *collector.DiskUsage, diskErr error) string {
+	if disk == nil {
+		if diskErr != nil {
+			return "-"
+		}
+		return "…"
+	}
+	p, ok := disk.ByContainer[id]
+	if !ok {
+		return "…" // started after the last refresh
+	}
+	return format.BytesPartial(p.Total(), !p.Complete())
+}
+
+// groupDiskCell is the DISK text of a project row: the total of its containers.
+func groupDiskCell(g group, disk *collector.DiskUsage, diskErr error) string {
+	if disk == nil {
+		return diskCell("", nil, diskErr)
+	}
+	var total int64
+	unknown := false
+	for _, c := range g.containers {
+		p, ok := disk.ByContainer[c.ID]
+		if !ok {
+			return "…"
+		}
+		total += p.Total()
+		unknown = unknown || !p.Complete()
+	}
+	return format.BytesPartial(total, unknown)
+}
+
+func containerRow(c collector.Container, disk string) listRow {
 	// Inside a compose project the service name is shorter and clearer than
 	// the generated container name ("project-service-1").
 	name := c.Name
@@ -164,7 +203,7 @@ func containerRow(c collector.Container) listRow {
 		}
 	}
 	return listRow{
-		cells: []string{"  " + marker + " " + name, c.Status, cpu, mem, strconv.Itoa(c.Restarts)},
+		cells: []string{"  " + marker + " " + name, c.Status, cpu, mem, disk, strconv.Itoa(c.Restarts)},
 		dim:   !c.Running(),
 		id:    c.ID,
 	}

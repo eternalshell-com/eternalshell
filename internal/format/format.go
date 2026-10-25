@@ -21,3 +21,16 @@ func Bytes(b uint64) string {
 func Percent(p float64) string {
 	return fmt.Sprintf("%.0f%%", p)
 }
+
+// BytesPartial formats a size that may be incomplete: "1.2G", "1.2G+?" if only
+// part of it could be measured, and "?" if nothing could.
+func BytesPartial(b int64, unknown bool) string {
+	switch {
+	case !unknown:
+		return Bytes(uint64(max(b, 0)))
+	case b <= 0:
+		return "?"
+	default:
+		return Bytes(uint64(b)) + "+?"
+	}
+}

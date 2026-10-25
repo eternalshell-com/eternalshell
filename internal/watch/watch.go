@@ -10,6 +10,7 @@ import (
 
 	"eternalshell/internal/collector"
 	"eternalshell/internal/config"
+	"eternalshell/internal/format"
 	"eternalshell/internal/mail"
 )
 
@@ -35,11 +36,15 @@ func Run(ctx context.Context, o Options) error {
 	cfg := o.Config
 	cpu := cfg.Alerts.CPU
 	eng := NewEngine(cpu.Process, cpu.Total, Interval)
+	eng.SetDiskThreshold(cfg.Alerts.Disk.Percent)
+	o.Collector.EnableDiskUsage() // the breakdown in disk mails; refreshed in the background
 	self := os.Getpid()
 	lg := logger{out: o.Out}
 
 	lg.event("INFO", "watching: cpu-process >= %s of one core for %s, cpu-total >= %s for %s, sampling every %s",
 		pct(cpu.Process.Percent), duration(cpu.Process.Duration), pct(cpu.Total.Percent), duration(cpu.Total.Duration), Interval)
+	lg.event("INFO", "disk >= %s used on any real mount, checked every %s",
+		pct(cfg.Alerts.Disk.Percent), DiskCheckEvery)
 	lg.event("INFO", "mail to %s via %s:%d (%s)",
 		strings.Join(cfg.SMTP.To, ", "), cfg.SMTP.Host, cfg.SMTP.Port, mail.TransportFor(cfg.SMTP.Port))
 	for _, th := range []struct {
@@ -55,12 +60,18 @@ func Run(ctx context.Context, o Options) error {
 	// all-clear mail can still describe a process that has already exited.
 	known := map[Key]collector.Process{}
 
+	// skipLogged remembers mounts we already said we cannot read, so each one is
+	// logged once. pendingSince is when a notice was first waiting to be sent.
+	skipLogged := map[string]bool{}
+	pendingSince := map[int]time.Time{}
+
 	ticker := time.NewTicker(Interval)
 	defer ticker.Stop()
 
 	// The first Collect only takes the first sample (CPU values are deltas), so
 	// it is done right away instead of waiting a full interval.
-	for first := true; ; first = false {
+	for tick := 0; ; tick++ {
+		first := tick == 0
 		if !first {
 			select {
 			case <-ctx.Done():
@@ -85,19 +96,96 @@ func Run(ctx context.Context, o Options) error {
 		}
 		remember(known, eng, snap)
 
+		logMountSkips(lg, skipLogged, snap)
+		if tick%int(DiskCheckEvery/Interval) == 0 {
+			for _, n := range eng.StepDisk(mountSamples(snap)) {
+				level := "ALERT"
+				if n.Kind == KindClear {
+					level = "CLEAR"
+				}
+				lg.event(level, "%s", describeDisk(n, snap))
+			}
+		}
+
+		now := time.Now()
 		for _, n := range eng.Pending() {
 			if ctx.Err() != nil {
 				break
 			}
-			d := Details{Server: cfg.Server.Name, Now: time.Now(), Snap: snap, Proc: processFor(n, known, snap)}
+			if _, ok := pendingSince[n.ID]; !ok {
+				pendingSince[n.ID] = now
+			}
+			if waitForDiskData(n, snap, now.Sub(pendingSince[n.ID])) {
+				continue // the mail should carry the Docker breakdown; it is on its way
+			}
+			d := Details{Server: cfg.Server.Name, Now: now, Snap: snap, Proc: processFor(n, known, snap), Mount: mountFor(n, snap)}
 			if err := send(ctx, cfg.SMTP, o.Password, Message(n, d)); err != nil {
 				lg.event("ERROR", "mail failed for %s: %s (will retry in %s)", noticeLabel(n), mail.Explain(err, cfg.SMTP), Interval)
 				continue
 			}
 			eng.Sent(n.ID)
+			delete(pendingSince, n.ID)
 			lg.event("INFO", "mail sent: %s", noticeLabel(n))
 		}
 		forget(known, eng)
+	}
+}
+
+// diskWait is how long a disk alert may wait for the first Docker disk usage
+// result (which can take a while on a big server) before it is sent without.
+const diskWait = 3 * time.Minute
+
+// waitForDiskData reports whether a disk alert should wait a little longer: the
+// breakdown by project is only available once the first background refresh has
+// finished (or failed).
+func waitForDiskData(n Notice, snap *collector.Snapshot, waited time.Duration) bool {
+	if n.Key.Rule != RuleDisk || n.Kind != KindAlert {
+		return false
+	}
+	if snap.Disk != nil || snap.DiskErr != nil {
+		return false
+	}
+	return waited < diskWait
+}
+
+// mountSamples turns the readable mounts of a snapshot into the engine's input.
+func mountSamples(snap *collector.Snapshot) []MountSample {
+	out := make([]MountSample, 0, len(snap.Mounts))
+	for _, m := range snap.Mounts {
+		out = append(out, MountSample{Path: m.Path, UsedPercent: m.UsedPercent})
+	}
+	return out
+}
+
+// mountFor finds the mount of a disk notice in the snapshot; nil for other
+// notices or a mount that is gone.
+func mountFor(n Notice, snap *collector.Snapshot) *collector.Mount {
+	if n.Key.Rule != RuleDisk {
+		return nil
+	}
+	for i := range snap.Mounts {
+		if snap.Mounts[i].Path == n.Key.Mount {
+			return &snap.Mounts[i]
+		}
+	}
+	return nil
+}
+
+// logMountSkips logs each unreadable mount once, and forgets it when it can be
+// read again (so a later problem is logged again).
+func logMountSkips(lg logger, logged map[string]bool, snap *collector.Snapshot) {
+	now := map[string]bool{}
+	for _, sk := range snap.MountSkips {
+		now[sk.Path] = true
+		if !logged[sk.Path] {
+			logged[sk.Path] = true
+			lg.event("WARN", "cannot read mount %s: %s (skipped)", sk.Path, sk.Reason)
+		}
+	}
+	for path := range logged {
+		if !now[path] {
+			delete(logged, path)
+		}
 	}
 }
 
@@ -186,10 +274,29 @@ func describe(n Notice, known map[Key]collector.Process, snap *collector.Snapsho
 	return fmt.Sprintf("%s %s, recent avg=%s", what, reason, pct(n.Avg))
 }
 
+// describeDisk is the log line for a new disk notice.
+func describeDisk(n Notice, snap *collector.Snapshot) string {
+	if n.Kind == KindAlert {
+		free := ""
+		if m := mountFor(n, snap); m != nil {
+			free = fmt.Sprintf(", %s free", format.Bytes(m.Total-m.Used))
+		}
+		return fmt.Sprintf("disk %s used=%s (threshold %s)%s", n.Key.Mount, pct(n.Avg), pct(n.Threshold), free)
+	}
+	reason := "below threshold"
+	if n.Reason == ReasonGone {
+		reason = "no longer mounted"
+	}
+	return fmt.Sprintf("disk %s %s, now %s", n.Key.Mount, reason, pct(n.Avg))
+}
+
 func noticeLabel(n Notice) string {
 	kind := "alert"
 	if n.Kind == KindClear {
 		kind = "all-clear"
+	}
+	if n.Key.Rule == RuleDisk {
+		return fmt.Sprintf("%s disk %s", kind, n.Key.Mount)
 	}
 	if n.Key.Rule == RuleProcess {
 		return fmt.Sprintf("%s %s pid=%d", kind, n.Key.Rule, n.Key.PID)

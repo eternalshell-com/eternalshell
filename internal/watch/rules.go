@@ -23,14 +23,23 @@ type Rule string
 const (
 	RuleProcess Rule = "cpu-process" // one process above its threshold
 	RuleTotal   Rule = "cpu-total"   // the whole server above its threshold
+	RuleDisk    Rule = "disk"        // one mounted filesystem too full
 )
+
+// DiskCheckEvery is the time between two disk checks: every 6th sample.
+const DiskCheckEvery = 6 * Interval
+
+// DiskClearMargin is how far below the threshold a mount has to fall before the
+// all-clear. It keeps a mount hovering around the threshold from flapping.
+const DiskClearMargin = 2.0
 
 // Key identifies what is being watched. A process is identified by PID and
 // start time together, so a reused PID is a different process.
 type Key struct {
 	Rule  Rule
-	PID   int32
-	Start uint64
+	PID   int32  // process rule
+	Start uint64 // process rule
+	Mount string // disk rule: the mount point
 }
 
 // ProcSample is one process in one observation.
@@ -63,6 +72,7 @@ type Reason int
 const (
 	ReasonBelow  Reason = iota // the 1-minute average dropped below the threshold
 	ReasonExited               // the process is gone
+	ReasonGone                 // the mount is gone
 )
 
 // Notice is a mail that has to be sent. It stays pending until Sent is called,
@@ -93,6 +103,8 @@ type Engine struct {
 	interval       time.Duration
 
 	trackers map[Key]*tracker
+	disks    map[string]*diskTracker
+	diskPct  float64
 	pending  []Notice // not sent yet, oldest first
 	created  []Notice // made by the current Step
 	nextID   int
@@ -105,7 +117,98 @@ func NewEngine(process, total config.Threshold, interval time.Duration) *Engine 
 		total:    total,
 		interval: interval,
 		trackers: map[Key]*tracker{},
+		disks:    map[string]*diskTracker{},
 	}
+}
+
+// SetDiskThreshold sets the percentage from which a mount raises the disk alert.
+func (e *Engine) SetDiskThreshold(percent float64) { e.diskPct = percent }
+
+// MountSample is one mounted filesystem in one disk check.
+type MountSample struct {
+	Path        string
+	UsedPercent float64
+}
+
+// diskTracker is the state of one mount.
+type diskTracker struct {
+	active  bool
+	steps   int // checks since the incident started
+	alertID int
+	last    float64
+}
+
+// StepDisk feeds one disk check into the rules. A mount fires once when its use
+// reaches the threshold and clears when it is DiskClearMargin points below it.
+// A mount that is not in the list any more is cleared. Notices work as in Step.
+func (e *Engine) StepDisk(mounts []MountSample) []Notice {
+	e.created = nil
+
+	seen := make(map[string]bool, len(mounts))
+	for _, m := range mounts {
+		seen[m.Path] = true
+		t, ok := e.disks[m.Path]
+		if !ok {
+			t = &diskTracker{}
+			e.disks[m.Path] = t
+		}
+		t.last = m.UsedPercent
+		key := Key{Rule: RuleDisk, Mount: m.Path}
+
+		switch {
+		case !t.active && e.diskPct > 0 && m.UsedPercent >= e.diskPct:
+			t.active, t.steps = true, 0
+			t.alertID = e.add(Notice{Kind: KindAlert, Key: key, Avg: m.UsedPercent, Threshold: e.diskPct})
+		case t.active:
+			t.steps++
+			if m.UsedPercent < e.diskPct-DiskClearMargin {
+				e.endDisk(key, t, ReasonBelow)
+			}
+		}
+	}
+
+	var gone []string
+	for path := range e.disks {
+		if !seen[path] {
+			gone = append(gone, path)
+		}
+	}
+	sort.Strings(gone)
+	for _, path := range gone {
+		if t := e.disks[path]; t.active {
+			e.endDisk(Key{Rule: RuleDisk, Mount: path}, t, ReasonGone)
+		}
+		delete(e.disks, path)
+	}
+	return e.createdAndPending()
+}
+
+// endDisk closes a disk incident. As with CPU, an alert that was never sent is
+// dropped together with its all-clear.
+func (e *Engine) endDisk(key Key, t *diskTracker, reason Reason) {
+	t.active = false
+	if e.drop(t.alertID) {
+		return
+	}
+	e.add(Notice{
+		Kind: KindClear, Key: key, Avg: t.last, Threshold: e.diskPct,
+		Lasted: time.Duration(t.steps) * DiskCheckEvery, Reason: reason,
+	})
+}
+
+// createdAndPending returns the notices made by the current step that still
+// exist: an alert created and dropped within the same step is not news.
+func (e *Engine) createdAndPending() []Notice {
+	var out []Notice
+	for _, n := range e.created {
+		for _, p := range e.pending {
+			if p.ID == n.ID {
+				out = append(out, n)
+				break
+			}
+		}
+	}
+	return out
 }
 
 // windowLen is the number of samples that make up a duration (at least 1).
@@ -149,18 +252,7 @@ func (e *Engine) Step(obs Observation) []Notice {
 		delete(e.trackers, key)
 	}
 
-	// Report only notices that still exist: an alert that was created and
-	// dropped within the same step (its incident already over) is not news.
-	var out []Notice
-	for _, n := range e.created {
-		for _, p := range e.pending {
-			if p.ID == n.ID {
-				out = append(out, n)
-				break
-			}
-		}
-	}
-	return out
+	return e.createdAndPending()
 }
 
 // feed adds one sample to a tracker and fires or clears if needed.

@@ -17,10 +17,9 @@ alerts:
     # the average of the last minute is below the threshold again.
     process: { percent: 80, duration: 15m }   # one process, 100 = one full core
     total:   { percent: 90, duration: 10m }   # the whole server, 100 = all cores
-  ssh:
-    allowed_users: [philip]
-    allowed_ips: [203.0.113.10]               # addresses or CIDR ranges
-  disk: { percent: 90 }                       # any mount fuller than this
+  # `watch` checks every real mounted filesystem once a minute. One mail when a
+  # mount is at least this full, one all-clear when it is 2 points below.
+  disk: { percent: 90 }
 
 smtp:
   host: smtp.example.com

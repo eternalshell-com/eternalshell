@@ -103,7 +103,7 @@ func (m Model) handleLogsMsg(msg logsMsg) (tea.Model, tea.Cmd) {
 
 // layoutLogs sizes the viewport and (re)wraps the text to the screen width.
 func (m *Model) layoutLogs() {
-	h := max(m.height-chromeLines, 4)
+	h := m.bodyHeight()
 	if m.logs.vp.Width != m.width || m.logs.vp.Height != h {
 		m.logs.vp = viewport.New(m.width, h)
 	}

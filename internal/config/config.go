@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"net/mail"
-	"net/netip"
 	"os"
 	"strings"
 	"time"
@@ -42,7 +41,6 @@ type Server struct {
 // Alerts holds the thresholds of the three alerts.
 type Alerts struct {
 	CPU  CPUAlerts `yaml:"cpu"`
-	SSH  SSHAlert  `yaml:"ssh"`
 	Disk DiskAlert `yaml:"disk"`
 }
 
@@ -56,12 +54,6 @@ type CPUAlerts struct {
 type Threshold struct {
 	Percent  float64       `yaml:"percent"`
 	Duration time.Duration `yaml:"duration"`
-}
-
-// SSHAlert lists the logins that are expected. Anything else raises an alert.
-type SSHAlert struct {
-	AllowedUsers []string `yaml:"allowed_users"`
-	AllowedIPs   []string `yaml:"allowed_ips"` // addresses or CIDR ranges
 }
 
 // DiskAlert fires when a mount is fuller than Percent.
@@ -162,6 +154,9 @@ func Parse(r io.Reader) (*Config, error) {
 	if err := rejectPasswordKey(data); err != nil {
 		return nil, err
 	}
+	if err := rejectRemovedKeys(data); err != nil {
+		return nil, err
+	}
 
 	cfg := Default() // defaults first: keys missing in the file keep them
 	dec := yaml.NewDecoder(bytes.NewReader(data))
@@ -193,6 +188,21 @@ func rejectPasswordKey(data []byte) error {
 	return nil
 }
 
+// rejectRemovedKeys explains keys that existed once and are gone, instead of
+// the generic "field not found" of the strict parser.
+func rejectRemovedKeys(data []byte) error {
+	var raw struct {
+		Alerts map[string]any `yaml:"alerts"`
+	}
+	if yaml.Unmarshal(data, &raw) != nil {
+		return nil // syntax errors are reported by the real decode
+	}
+	if _, ok := raw.Alerts["ssh"]; ok {
+		return errors.New("alerts.ssh was removed (the SSH alert is dropped); delete the ssh: block from the config")
+	}
+	return nil
+}
+
 // Validate checks the values that every use of the config relies on.
 // It reports all problems at once, not just the first.
 func (c *Config) Validate() error {
@@ -215,9 +225,6 @@ func (c *Config) Validate() error {
 	}
 	check(validPercent(c.Alerts.Disk.Percent), "alerts.disk.percent must be between 1 and 100, got %v", c.Alerts.Disk.Percent)
 
-	for _, s := range c.Alerts.SSH.AllowedIPs {
-		check(validIPOrCIDR(s), "alerts.ssh.allowed_ips: %q is not an IP address or CIDR range", s)
-	}
 	return errors.Join(errs...)
 }
 
@@ -270,11 +277,3 @@ func (s SMTP) Password() (string, error) {
 }
 
 func validPercent(p float64) bool { return p >= 1 && p <= 100 }
-
-func validIPOrCIDR(s string) bool {
-	if _, err := netip.ParseAddr(s); err == nil {
-		return true
-	}
-	_, err := netip.ParsePrefix(s)
-	return err == nil
-}

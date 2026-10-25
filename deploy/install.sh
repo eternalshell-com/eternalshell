@@ -62,6 +62,14 @@ set -e
 Build it static for Linux amd64:
   $BUILD_CMD"
 
+# The SSH alert was removed. A config that still has the block would make the
+# new version refuse to start, so stop before the running install is replaced.
+if [ -f "$CONF_FILE" ] && grep -Eq '^[[:space:]]+ssh:' "$CONF_FILE"; then
+  die "$CONF_FILE still has an 'ssh:' block under alerts. The SSH alert was removed.
+Delete that block (sudoedit $CONF_FILE), then run this script again.
+Nothing has been changed on this machine."
+fi
+
 # --- User --------------------------------------------------------------------
 
 if id "$SERVICE_USER" >/dev/null 2>&1; then

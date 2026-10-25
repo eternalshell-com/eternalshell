@@ -22,9 +22,9 @@ import (
 // this interval.
 const refreshEvery = 2 * time.Second
 
-// chromeLines are the screen rows around the main area: info line, tabs (or log
-// title) and footer.
-const chromeLines = 3
+// chromeLines are the screen rows around the main area of the two main views:
+// info line, tabs, disk summary and footer. The log screen has no disk summary.
+const chromeLines = 4
 
 // logLinesShown is the number of log lines requested; shown in the log title.
 const logLinesShown = 200
@@ -198,7 +198,7 @@ func (m *Model) layout() {
 }
 
 func (m *Model) refreshRows() {
-	m.containers.setRows(containerRows(m.snap.Containers))
+	m.containers.setRows(containerRows(m.snap.Containers, m.snap.Disk, m.snap.DiskErr))
 	m.processes.SetRows(processRows(m.snap.Processes, m.showKernel))
 	// Rows can shrink between refreshes; re-set the cursor so it is clamped.
 	m.processes.SetCursor(m.processes.Cursor())
@@ -218,6 +218,7 @@ func (m Model) View() string {
 		m.infoView(),
 		m.tabsView(),
 		m.bodyView(),
+		m.diskSummaryView(),
 		m.footerView(),
 	)
 }
@@ -287,8 +288,33 @@ func (m Model) bodyView() string {
 // message renders a text block with the same height as the tables, so the
 // footer stays at the bottom.
 func (m Model) message(text string) string {
-	h := max(m.height-chromeLines, 4)
+	h := m.bodyHeight()
 	return lipgloss.NewStyle().Height(h).Render(emptyViewStyle.Width(max(m.width, 20)).Render(text))
+}
+
+// bodyHeight is the number of rows between the title lines and the footer.
+func (m Model) bodyHeight() int {
+	if m.logs.active {
+		return max(m.height-(chromeLines-1), 4) // the log screen has no disk summary
+	}
+	return max(m.height-chromeLines, 4)
+}
+
+// diskSummaryView is the one line about Docker's disk use that is not part of
+// any container: images, build cache and what could be reclaimed.
+func (m Model) diskSummaryView() string {
+	text := " disk: measuring Docker disk usage…"
+	switch {
+	case m.snap == nil:
+		text = " disk: collecting…"
+	case m.snap.Disk != nil:
+		u := m.snap.Disk
+		text = fmt.Sprintf(" disk: images %s · build cache %s · reclaimable %s",
+			format.Bytes(uint64(u.Images)), format.Bytes(uint64(u.BuildCache)), format.Bytes(uint64(u.Reclaimable)))
+	case m.snap.DiskErr != nil:
+		text = " disk: Docker disk usage unavailable: " + m.snap.DiskErr.Error()
+	}
+	return infoStyle.MaxWidth(max(m.width, 1)).Render(text)
 }
 
 func (m Model) footerView() string {

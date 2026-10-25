@@ -40,7 +40,10 @@ SyslogIdentifier=eternalshell
 # ProtectProc= and ProcSubset= are deliberately NOT used.
 NoNewPrivileges=yes
 ProtectSystem=strict
-ProtectHome=yes
+# read-only, not "yes": compose projects and their bind-mounted data often live
+# under /home, and the disk usage per project has to read them. Writing to
+# /home stays blocked.
+ProtectHome=read-only
 PrivateTmp=yes
 MemoryMax=256M
 
@@ -49,8 +52,19 @@ MemoryMax=256M
 # add AF_NETLINK here. It is not added up front.
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
-# Reading /proc of other users' processes needs no capability.
-CapabilityBoundingSet=
+# CAP_DAC_READ_SEARCH lets the service READ and traverse files and directories
+# it has no permission for. It cannot write. It is needed for the disk usage:
+#   - the container log files in /var/lib/docker/containers (that directory is
+#     root-only, mode 0710), and
+#   - bind-mounted project directories, which are often owned by container
+#     users (for example uid 999 for postgres).
+# The capability applies to the whole process; the code only stats and walks
+# directories. The docker group membership is already root-equivalent, so this
+# adds no new power in practice. Without it the disk numbers show "?" for logs
+# and "+?" for bind mounts. Reading /proc of other users' processes needs no
+# capability.
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_DAC_READ_SEARCH
 PrivateDevices=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

@@ -227,3 +227,91 @@ func TestActiveKeys(t *testing.T) {
 		t.Errorf("Active = %+v", keys)
 	}
 }
+
+func newDiskEngine() *Engine {
+	e := newTestEngine()
+	e.SetDiskThreshold(90)
+	return e
+}
+
+func disks(pairs ...any) []MountSample {
+	var out []MountSample
+	for i := 0; i < len(pairs); i += 2 {
+		out = append(out, MountSample{Path: pairs[i].(string), UsedPercent: pairs[i+1].(float64)})
+	}
+	return out
+}
+
+func TestDiskFiresAtThresholdOnce(t *testing.T) {
+	e := newDiskEngine()
+	if got := e.StepDisk(disks("/", 89.9)); len(got) != 0 {
+		t.Fatalf("below the threshold must not fire, got %+v", got)
+	}
+	got := e.StepDisk(disks("/", 90.0)) // >= fires
+	if len(got) != 1 || got[0].Kind != KindAlert || got[0].Key.Rule != RuleDisk || got[0].Key.Mount != "/" || got[0].Threshold != 90 {
+		t.Fatalf("want one disk alert for /, got %+v", got)
+	}
+	for _, v := range []float64{91, 95, 99} {
+		if got := e.StepDisk(disks("/", v)); len(got) != 0 {
+			t.Errorf("no repeat while it lasts, got %+v", got)
+		}
+	}
+}
+
+func TestDiskClearsTwoPointsBelow(t *testing.T) {
+	e := newDiskEngine()
+	n := e.StepDisk(disks("/", 92.0))
+	e.Sent(n[0].ID)
+
+	// inside the band (88..90) it stays active
+	for _, v := range []float64{89, 88.5, 88.0} {
+		if got := e.StepDisk(disks("/", v)); len(got) != 0 {
+			t.Fatalf("%.1f%% is inside the band, got %+v", v, got)
+		}
+	}
+	got := e.StepDisk(disks("/", 87.9))
+	if len(got) != 1 || got[0].Kind != KindClear || got[0].Reason != ReasonBelow || got[0].Avg != 87.9 {
+		t.Fatalf("want an all-clear at 87.9%%, got %+v", got)
+	}
+	if got[0].Lasted <= 0 {
+		t.Errorf("Lasted should be positive, got %v", got[0].Lasted)
+	}
+	e.Sent(got[0].ID)
+
+	// can fire again after a clear
+	if got := e.StepDisk(disks("/", 91.0)); len(got) != 1 || got[0].Kind != KindAlert {
+		t.Errorf("should fire again, got %+v", got)
+	}
+}
+
+func TestDiskUnsentAlertDroppedWhenItEnds(t *testing.T) {
+	e := newDiskEngine()
+	e.StepDisk(disks("/", 95.0)) // alert never delivered
+	e.StepDisk(disks("/", 50.0)) // back down
+	if p := e.Pending(); len(p) != 0 {
+		t.Errorf("neither alert nor all-clear should remain, got %+v", p)
+	}
+}
+
+func TestDiskMountsAreIndependentAndGoneClears(t *testing.T) {
+	e := newDiskEngine()
+	got := e.StepDisk(disks("/", 50.0, "/data", 95.0))
+	if len(got) != 1 || got[0].Key.Mount != "/data" {
+		t.Fatalf("only /data should fire, got %+v", got)
+	}
+	e.Sent(got[0].ID)
+
+	got = e.StepDisk(disks("/", 50.0)) // /data is not mounted any more
+	if len(got) != 1 || got[0].Kind != KindClear || got[0].Reason != ReasonGone || got[0].Key.Mount != "/data" {
+		t.Errorf("want a clear (gone) for /data, got %+v", got)
+	}
+}
+
+func TestDiskFailedSendIsRetried(t *testing.T) {
+	e := newDiskEngine()
+	n := e.StepDisk(disks("/", 95.0))
+	e.StepDisk(disks("/", 95.0))
+	if p := e.Pending(); len(p) != 1 || p[0].ID != n[0].ID {
+		t.Errorf("the unsent alert must stay pending, got %+v", p)
+	}
+}

@@ -19,12 +19,22 @@ type Details struct {
 	// one seen if it has exited. Nil if it was never seen.
 	Proc *collector.Process
 
-	// Snap is the current state of the server (total CPU, load, top processes).
+	// Snap is the current state of the server (total CPU, load, top processes,
+	// Docker disk usage).
 	Snap *collector.Snapshot
+
+	// Mount is the filesystem of a disk notice; nil if it is gone.
+	Mount *collector.Mount
 }
 
 // Message builds the mail for a notice.
 func Message(n Notice, d Details) mail.Message {
+	if n.Key.Rule == RuleDisk {
+		if n.Kind == KindClear {
+			return diskClearMessage(n, d)
+		}
+		return diskAlertMessage(n, d)
+	}
 	if n.Kind == KindClear {
 		return clearMessage(n, d)
 	}

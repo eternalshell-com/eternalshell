@@ -30,7 +30,7 @@ func fakeSnapshot() *collector.Snapshot {
 }
 
 func TestContainerRows(t *testing.T) {
-	rows := containerRows(fakeSnapshot().Containers)
+	rows := containerRows(fakeSnapshot().Containers, nil, nil)
 
 	// two group headers + three containers
 	if len(rows) != 5 {
@@ -46,7 +46,7 @@ func TestContainerRows(t *testing.T) {
 		t.Errorf("row 1 cpu/mem = %q/%q", rows[1].cells[2], rows[1].cells[3])
 	}
 	// stopped container: no CPU/MEM, but restarts are shown
-	if rows[2].cells[0] != "  ○ cron" || rows[2].cells[2] != "-" || rows[2].cells[3] != "-" || rows[2].cells[4] != "3" {
+	if rows[2].cells[0] != "  ○ cron" || rows[2].cells[2] != "-" || rows[2].cells[3] != "-" || rows[2].cells[5] != "3" {
 		t.Errorf("stopped row = %v", rows[2].cells)
 	}
 	if got := rows[4].cells[0]; got != "  ● traefik (traefik:v3.1)" {
@@ -219,7 +219,7 @@ func TestGroupOrder(t *testing.T) {
 		t.Errorf("standalone problem container should come first: %+v", groups[1].containers)
 	}
 
-	rows := containerRows(cs)
+	rows := containerRows(cs, nil, nil)
 	if rows[0].cells[0] != "beta !" {
 		t.Errorf("first header = %q, want %q", rows[0].cells[0], "beta !")
 	}
@@ -341,7 +341,7 @@ func TestUnknownCPUShowsDash(t *testing.T) {
 	if !strings.Contains(m.View(), "CPU -") {
 		t.Errorf("header should show CPU -:\n%s", m.View())
 	}
-	rows := containerRows(snap.Containers)
+	rows := containerRows(snap.Containers, nil, nil)
 	if rows[1].cells[2] != "-" {
 		t.Errorf("running container CPU = %q, want -", rows[1].cells[2])
 	}
@@ -538,5 +538,87 @@ func TestFooterMentionsLogs(t *testing.T) {
 	m := ready(t, fakeSnapshot())
 	if !strings.Contains(m.View(), "1/2 switch view · ↑/↓ scroll · enter logs · q quit") {
 		t.Errorf("footer:\n%s", m.View())
+	}
+}
+
+func diskFixture() *collector.DiskUsage {
+	return &collector.DiskUsage{
+		Images: 12 << 30, BuildCache: 4 << 30, Reclaimable: 2 << 30,
+		ByContainer: map[string]collector.DiskParts{
+			"id-app":  {Layers: 100 << 20, Volumes: 900 << 20}, // 1.0G, complete
+			"id-cron": {Layers: 10 << 20, LogsUnknown: true},   // incomplete logs
+			// id-traefik is missing: started after the last refresh
+		},
+	}
+}
+
+func TestDiskColumn(t *testing.T) {
+	cs := fakeSnapshot().Containers
+
+	// before the first result: "…"; failed: "-"
+	rows := containerRows(cs, nil, nil)
+	if rows[1].cells[4] != "…" || rows[0].cells[4] != "…" {
+		t.Errorf("before the first result: container %q, project %q, want …", rows[1].cells[4], rows[0].cells[4])
+	}
+	if rows := containerRows(cs, nil, errors.New("down")); rows[1].cells[4] != "-" {
+		t.Errorf("failed refresh: %q, want -", rows[1].cells[4])
+	}
+
+	rows = containerRows(cs, diskFixture(), nil)
+	// project "lienks-app": app 1.0G + cron 10M and unknown logs -> 1.0G+? on the header
+	var appRow, cronRow, headerRow, traefikRow listRow
+	for _, r := range rows {
+		switch {
+		case r.id == "id-app":
+			appRow = r
+		case r.id == "id-cron":
+			cronRow = r
+		case r.id == "id-traefik":
+			traefikRow = r
+		case r.header && strings.HasPrefix(r.cells[0], "lienks-app"):
+			headerRow = r
+		}
+	}
+	if appRow.cells[4] != "1000.0M" && appRow.cells[4] != "1.0G" {
+		t.Errorf("app disk = %q", appRow.cells[4])
+	}
+	if cronRow.cells[4] != "10.0M+?" {
+		t.Errorf("cron disk = %q, want 10.0M+? (logs unknown)", cronRow.cells[4])
+	}
+	if !strings.HasSuffix(headerRow.cells[4], "+?") {
+		t.Errorf("the project row is the total of its containers and inherits the unknown: %q", headerRow.cells[4])
+	}
+	if traefikRow.cells[4] != "…" {
+		t.Errorf("a container missing from the last refresh shows …, got %q", traefikRow.cells[4])
+	}
+}
+
+func TestDiskSummaryLine(t *testing.T) {
+	snap := fakeSnapshot()
+	m := ready(t, snap)
+	if !strings.Contains(m.View(), "measuring Docker disk usage") {
+		t.Errorf("before the first result:\n%s", m.View())
+	}
+
+	snap = fakeSnapshot()
+	snap.Disk = diskFixture()
+	m = ready(t, snap)
+	out := m.View()
+	for _, want := range []string{"images 12.0G", "build cache 4.0G", "reclaimable 2.0G", "DISK"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("view should contain %q:\n%s", want, out)
+		}
+	}
+
+	snap = fakeSnapshot()
+	snap.DiskErr = errors.New("docker not reachable")
+	m = ready(t, snap)
+	if !strings.Contains(m.View(), "Docker disk usage unavailable: docker not reachable") {
+		t.Errorf("failed refresh:\n%s", m.View())
+	}
+
+	// the screen is always exactly as high as the window
+	if n := strings.Count(m.View(), "\n") + 1; n != 30 {
+		t.Errorf("screen has %d lines, want 30", n)
 	}
 }

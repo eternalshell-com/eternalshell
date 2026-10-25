@@ -34,9 +34,6 @@ func TestExampleFileParses(t *testing.T) {
 	if cfg.Alerts.CPU.Total.Percent != 90 || cfg.Alerts.CPU.Total.Duration != 10*time.Minute {
 		t.Errorf("cpu.total = %+v", cfg.Alerts.CPU.Total)
 	}
-	if got := cfg.Alerts.SSH; len(got.AllowedUsers) != 1 || got.AllowedUsers[0] != "philip" || got.AllowedIPs[0] != "203.0.113.10" {
-		t.Errorf("ssh = %+v", got)
-	}
 	if cfg.Alerts.Disk.Percent != 90 {
 		t.Errorf("disk = %+v", cfg.Alerts.Disk)
 	}
@@ -119,8 +116,6 @@ alerts:
   cpu:
     process: { percent: 150, duration: 0s }
     total:   { percent: 0 }
-  ssh:
-    allowed_ips: [203.0.113.10, 10.0.0.0/8, not-an-ip]
   disk: { percent: -5 }
 `))
 	if err == nil {
@@ -129,14 +124,18 @@ alerts:
 	msg := err.Error()
 	for _, want := range []string{
 		"alerts.cpu.process.percent", "alerts.cpu.process.duration",
-		"alerts.cpu.total.percent", "alerts.disk.percent", `"not-an-ip"`,
+		"alerts.cpu.total.percent", "alerts.disk.percent",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("error should mention %q:\n%s", want, msg)
 		}
 	}
-	if strings.Contains(msg, "203.0.113.10") || strings.Contains(msg, "10.0.0.0/8") {
-		t.Errorf("valid IPs must not be reported:\n%s", msg)
+}
+
+func TestRemovedSSHBlockHasAClearMessage(t *testing.T) {
+	_, err := Parse(strings.NewReader("alerts:\n  ssh:\n    allowed_users: [philip]\n"))
+	if err == nil || !strings.Contains(err.Error(), "alerts.ssh was removed") {
+		t.Errorf("want a clear message about the removed ssh block, got %v", err)
 	}
 }
 

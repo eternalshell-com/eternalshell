@@ -8,6 +8,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/shirou/gopsutil/v4/disk"
@@ -61,10 +62,23 @@ type Snapshot struct {
 	MemUsed    uint64
 	MemPercent float64
 	Mounts     []Mount
-	Processes  []Process // all readable processes, sorted by CPU descending
+	MountSkips []MountSkip // real mounts that could not be read
+	Processes  []Process   // all readable processes, sorted by CPU descending
 
 	Containers []Container // empty if Docker is unreachable
 	DockerErr  error       // why Docker data is missing; not a failure of the snapshot
+
+	// Disk is the latest Docker disk usage (refreshed in the background every
+	// 5 minutes). It is nil until the first refresh has finished, and stays nil
+	// if disk usage was not enabled. DiskErr is the error of the latest refresh.
+	Disk    *DiskUsage
+	DiskErr error
+}
+
+// MountSkip is a mounted filesystem that was left out because it cannot be read.
+type MountSkip struct {
+	Path   string
+	Reason string
 }
 
 // procMeta is what we remember about a process so it is read only once:
@@ -103,20 +117,83 @@ type Collector struct {
 	prev     *sample
 	meta     map[int32]procMeta
 	pageSize uint64
+
+	ctx    context.Context // cancelled by Close; stops a running disk refresh
+	cancel context.CancelFunc
+	disk   diskState
+}
+
+// diskState is the background disk usage refresh. It is the one part of the
+// Collector that is touched by more than one goroutine, so it has a mutex.
+type diskState struct {
+	mu        sync.Mutex
+	enabled   bool
+	running   bool
+	lastStart time.Time
+	result    *DiskUsage
+	err       error
 }
 
 // New creates a Collector. It does not connect to Docker yet.
 func New() *Collector {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Collector{
 		docker:   newDocker(),
 		meta:     map[int32]procMeta{},
 		pageSize: uint64(os.Getpagesize()),
+		ctx:      ctx,
+		cancel:   cancel,
 	}
 }
 
-// Close releases the Docker client.
+// Close stops a running disk refresh and releases the Docker client.
 func (c *Collector) Close() {
+	c.cancel()
 	c.docker.close()
+}
+
+// EnableDiskUsage turns on the background Docker disk usage. It is off by
+// default so that quick commands like `status` never wait for it.
+func (c *Collector) EnableDiskUsage() {
+	c.disk.mu.Lock()
+	c.disk.enabled = true
+	c.disk.mu.Unlock()
+}
+
+// refreshDisk starts a background refresh if one is due, and returns the latest
+// result. It never waits for the refresh: the Docker call can take seconds, and
+// with big bind-mount directories much longer.
+func (c *Collector) refreshDisk(now time.Time) (*DiskUsage, error) {
+	d := &c.disk
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.enabled {
+		return nil, nil
+	}
+	if !d.running && (d.lastStart.IsZero() || now.Sub(d.lastStart) >= diskEvery) {
+		d.running = true
+		d.lastStart = now
+		go c.runDiskRefresh()
+	}
+	return d.result, d.err
+}
+
+// runDiskRefresh is the body of the background goroutine.
+func (c *Collector) runDiskRefresh() {
+	ctx, cancel := context.WithTimeout(c.ctx, diskTimeout)
+	defer cancel()
+	usage, err := c.docker.diskUsage(ctx)
+
+	d := &c.disk
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.running = false
+	if err != nil {
+		d.err = err
+		d.lastStart = time.Now().Add(diskRetryAfter - diskEvery) // try again sooner
+		return
+	}
+	d.result, d.err = usage, nil
 }
 
 type dockerResult struct {
@@ -174,7 +251,8 @@ func (c *Collector) Collect() (*Snapshot, error) {
 	if vm, err := mem.VirtualMemory(); err == nil {
 		s.MemTotal, s.MemUsed, s.MemPercent = vm.Total, vm.Used, vm.UsedPercent
 	}
-	s.Mounts = mounts()
+	s.Mounts, s.MountSkips = mounts()
+	s.Disk, s.DiskErr = c.refreshDisk(time.Now())
 	return s, nil
 }
 
@@ -314,24 +392,31 @@ func skipMount(path, fstype string) bool {
 	return fstype == "squashfs" || path == "/boot/efi" || strings.HasPrefix(path, "/boot/efi/")
 }
 
-// mounts returns real filesystems without duplicates (bind mounts).
-func mounts() []Mount {
+// mounts returns real filesystems without duplicates (bind mounts). A mount
+// that cannot be read, for example because of the service's hardening, is not
+// an error: it is returned in the second list so the caller can say so once.
+func mounts() ([]Mount, []MountSkip) {
 	parts, err := disk.Partitions(false)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	seen := map[string]bool{}
 	var out []Mount
+	var skipped []MountSkip
 	for _, p := range parts {
 		if seen[p.Device] || skipMount(p.Mountpoint, p.Fstype) {
 			continue
 		}
 		seen[p.Device] = true
 		u, err := disk.Usage(p.Mountpoint)
-		if err != nil || u.Total == 0 {
-			continue
+		switch {
+		case err != nil:
+			skipped = append(skipped, MountSkip{Path: p.Mountpoint, Reason: err.Error()})
+		case u.Total == 0:
+			skipped = append(skipped, MountSkip{Path: p.Mountpoint, Reason: "reports a size of 0"})
+		default:
+			out = append(out, Mount{Path: p.Mountpoint, Total: u.Total, Used: u.Used, UsedPercent: u.UsedPercent})
 		}
-		out = append(out, Mount{Path: p.Mountpoint, Total: u.Total, Used: u.Used, UsedPercent: u.UsedPercent})
 	}
-	return out
+	return out, skipped
 }

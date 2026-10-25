@@ -61,6 +61,7 @@ func main() {
 func runTUI() error {
 	c := collector.New()
 	defer c.Close()
+	c.EnableDiskUsage() // fills the DISK column in the background
 	_, err := tea.NewProgram(tui.New(c), tea.WithAltScreen()).Run()
 	return err
 }

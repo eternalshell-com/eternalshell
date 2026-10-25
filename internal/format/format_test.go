@@ -25,3 +25,21 @@ func TestPercent(t *testing.T) {
 		t.Errorf("Percent(381.6) = %q, want 382%%", got)
 	}
 }
+
+func TestBytesPartial(t *testing.T) {
+	tests := []struct {
+		b       int64
+		unknown bool
+		want    string
+	}{
+		{0, false, "0B"},
+		{3 << 30, false, "3.0G"},
+		{3 << 30, true, "3.0G+?"},
+		{0, true, "?"},
+	}
+	for _, tt := range tests {
+		if got := BytesPartial(tt.b, tt.unknown); got != tt.want {
+			t.Errorf("BytesPartial(%d, %v) = %q, want %q", tt.b, tt.unknown, got, tt.want)
+		}
+	}
+}
