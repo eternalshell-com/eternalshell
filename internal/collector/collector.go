@@ -121,6 +121,7 @@ type Collector struct {
 	ctx    context.Context // cancelled by Close; stops a running disk refresh
 	cancel context.CancelFunc
 	disk   diskState
+	sizes  *sizeCache // folder sizes, only touched by the (single) disk refresh
 }
 
 // diskState is the background disk usage refresh. It is the one part of the
@@ -143,6 +144,7 @@ func New() *Collector {
 		pageSize: uint64(os.Getpagesize()),
 		ctx:      ctx,
 		cancel:   cancel,
+		sizes:    newSizeCache(folderEvery),
 	}
 }
 
@@ -182,7 +184,7 @@ func (c *Collector) refreshDisk(now time.Time) (*DiskUsage, error) {
 func (c *Collector) runDiskRefresh() {
 	ctx, cancel := context.WithTimeout(c.ctx, diskTimeout)
 	defer cancel()
-	usage, err := c.docker.diskUsage(ctx)
+	usage, err := c.docker.diskUsage(ctx, c.sizes)
 
 	d := &c.disk
 	d.mu.Lock()

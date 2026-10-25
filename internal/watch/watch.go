@@ -64,6 +64,7 @@ func Run(ctx context.Context, o Options) error {
 	// logged once. pendingSince is when a notice was first waiting to be sent.
 	skipLogged := map[string]bool{}
 	pendingSince := map[int]time.Time{}
+	notesLogged := map[string]bool{}
 
 	ticker := time.NewTicker(Interval)
 	defer ticker.Stop()
@@ -97,6 +98,7 @@ func Run(ctx context.Context, o Options) error {
 		remember(known, eng, snap)
 
 		logMountSkips(lg, skipLogged, snap)
+		logDiskNotes(lg, notesLogged, snap)
 		if tick%int(DiskCheckEvery/Interval) == 0 {
 			for _, n := range eng.StepDisk(mountSamples(snap)) {
 				level := "ALERT"
@@ -169,6 +171,26 @@ func mountFor(n Notice, snap *collector.Snapshot) *collector.Mount {
 		}
 	}
 	return nil
+}
+
+// logDiskNotes logs each note of the Docker disk usage once (for example a
+// project folder that was skipped), and forgets it when it is gone.
+func logDiskNotes(lg logger, logged map[string]bool, snap *collector.Snapshot) {
+	now := map[string]bool{}
+	if snap.Disk != nil {
+		for _, n := range snap.Disk.Notes {
+			now[n] = true
+			if !logged[n] {
+				logged[n] = true
+				lg.event("WARN", "disk usage: %s", n)
+			}
+		}
+	}
+	for n := range logged {
+		if !now[n] && snap.Disk != nil {
+			delete(logged, n)
+		}
+	}
 }
 
 // logMountSkips logs each unreadable mount once, and forgets it when it can be

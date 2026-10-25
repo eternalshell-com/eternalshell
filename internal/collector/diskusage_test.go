@@ -36,7 +36,7 @@ func TestAggregateDisk(t *testing.T) {
 			"pgdata": known(400), // used by db only
 			"unused": known(30),  // used by nobody
 		},
-		Binds: map[string]sizeInfo{
+		Sizes: map[string]sizeInfo{
 			"/home/u/shop/data": known(200), // shared by web and db: 100 each
 			"/srv/kuma":         known(60),
 		},
@@ -126,7 +126,7 @@ func TestAggregateUnknownBindAndVolumePropagate(t *testing.T) {
 		Containers: []DiskContainer{{ID: "a", Name: "a", Project: "p", LogKnown: true,
 			Volumes: []string{"v"}, Binds: []string{"/srv/x"}}},
 		Volumes: map[string]sizeInfo{"v": {Bytes: 10, Known: false}},
-		Binds:   map[string]sizeInfo{"/srv/x": {Bytes: 20, Known: false}},
+		Sizes:   map[string]sizeInfo{"/srv/x": {Bytes: 20, Known: false}},
 	}, time.Now())
 
 	p := findProject(t, u, "p")
@@ -143,38 +143,215 @@ func TestAggregateUnknownBindAndVolumePropagate(t *testing.T) {
 
 func TestNestedBindPathIsNotCountedTwice(t *testing.T) {
 	// "app" mounts the whole project directory, "db" only a folder inside it.
+	// Both are binds outside any project folder, so they are nested roots.
 	u := aggregateDisk(diskInput{
 		Containers: []DiskContainer{
 			{ID: "app", Name: "app", Project: "p", LogKnown: true, Binds: []string{"/srv/p"}},
 			{ID: "db", Name: "db", Project: "p", LogKnown: true, Binds: []string{"/srv/p/db"}},
 		},
-		Binds: map[string]sizeInfo{"/srv/p": known(100)},
+		Sizes: map[string]sizeInfo{"/srv/p": known(100), "/srv/p/db": known(30)}, // full sizes
 	}, time.Now())
 
-	if u.BindsTotal != 100 || len(u.Binds) != 1 || u.Binds[0].Path != "/srv/p" {
-		t.Errorf("only the outer directory counts: total %d, binds %+v", u.BindsTotal, u.Binds)
+	if u.BindsTotal != 100 || len(u.Binds) != 2 {
+		t.Errorf("every byte once: total %d, binds %+v", u.BindsTotal, u.Binds)
 	}
-	if got := u.ByContainer["app"].Binds + u.ByContainer["db"].Binds; got != 100 {
-		t.Errorf("the two containers share the outer directory: %d", got)
+	if got := u.ByContainer["app"].Binds; got != 70 {
+		t.Errorf("app keeps the outer directory minus the inner one: %d, want 70", got)
+	}
+	if got := u.ByContainer["db"].Binds; got != 30 {
+		t.Errorf("db owns the inner directory: %d, want 30", got)
 	}
 }
 
-func TestCollapseBinds(t *testing.T) {
-	eff, unique := collapseBinds(map[string][]string{
-		"a": {"/srv/p/db", "/srv/p/cache"},
-		"b": {"/srv/p"},
-		"c": {"/srv/other"},
+func TestPlanRoots(t *testing.T) {
+	plan := planRoots([]DiskContainer{
+		// the project folder is also bound as "." (".:/app"), and so is a folder inside
+		{ID: "web", Project: "a", WorkDir: "/srv/a", Binds: []string{"/srv/a", "/srv/a/data", "/srv/outside"}},
+		{ID: "db", Project: "a", WorkDir: "/srv/a", Binds: []string{"/srv/outside"}},
+		// the same folder used by a second project name
+		{ID: "x", Project: "a2", WorkDir: "/srv/a"},
+		// a container with a folder but no project, and a standalone one: no folder
+		{ID: "lone", Binds: []string{"/srv/lone"}, WorkDir: "/srv/ignored"},
 	})
-	if want := []string{"/srv/other", "/srv/p"}; !reflect.DeepEqual(unique, want) {
-		t.Errorf("unique = %v, want %v", unique, want)
+
+	if want := []string{"a", "a2"}; !reflect.DeepEqual(plan.Folders["/srv/a"], want) {
+		t.Errorf("owners of /srv/a = %v, want %v", plan.Folders["/srv/a"], want)
 	}
-	if want := []string{"/srv/p"}; !reflect.DeepEqual(eff["a"], want) {
-		t.Errorf("eff[a] = %v, want %v (both inner paths collapse into one)", eff["a"], want)
+	if _, ok := plan.Folders["/srv/ignored"]; ok || len(plan.Folders) != 1 {
+		t.Errorf("only project folders count: %v", plan.Folders)
 	}
-	// a path that only shares a name prefix is not nested
-	_, unique = collapseBinds(map[string][]string{"a": {"/srv/p"}, "b": {"/srv/pp"}})
-	if len(unique) != 2 {
-		t.Errorf("/srv/pp is not inside /srv/p, got %v", unique)
+	if _, ok := plan.Binds["/srv/a"]; ok {
+		t.Error("a bind equal to the project folder is part of the files, not a bind")
+	}
+	if _, ok := plan.Binds["/srv/a/data"]; ok {
+		t.Error("a bind inside the project folder is part of the files, not a bind")
+	}
+	if want := []string{"db", "web"}; !reflect.DeepEqual(plan.Binds["/srv/outside"], want) {
+		t.Errorf("owners of /srv/outside = %v, want %v", plan.Binds["/srv/outside"], want)
+	}
+	if want := []string{"/srv/a", "/srv/lone", "/srv/outside"}; !reflect.DeepEqual(plan.Roots, want) {
+		t.Errorf("roots = %v, want %v", plan.Roots, want)
+	}
+}
+
+func TestExclusiveSizes(t *testing.T) {
+	// /a contains /a/b, which contains /a/b/c; /z is separate
+	got := exclusiveSizes(map[string]sizeInfo{
+		"/a": known(1000), "/a/b": known(300), "/a/b/c": known(100), "/z": known(5),
+	})
+	want := map[string]int64{"/a": 700, "/a/b": 200, "/a/b/c": 100, "/z": 5}
+	for p, w := range want {
+		if got[p].Bytes != w || !got[p].Known {
+			t.Errorf("%s = %+v, want %d bytes, known", p, got[p], w)
+		}
+	}
+
+	// an unknown nested root makes the outer one unknown
+	got = exclusiveSizes(map[string]sizeInfo{"/a": known(1000), "/a/b": {Bytes: 10, Known: false}})
+	if got["/a"].Known {
+		t.Errorf("the outer root must be unknown when an inner one is: %+v", got["/a"])
+	}
+
+	// never negative (the inner walk can be larger than the outer one if files changed)
+	got = exclusiveSizes(map[string]sizeInfo{"/a": known(10), "/a/b": known(50)})
+	if got["/a"].Bytes != 0 {
+		t.Errorf("exclusive size must not be negative: %+v", got["/a"])
+	}
+
+	// a name prefix is not nesting
+	got = exclusiveSizes(map[string]sizeInfo{"/srv/p": known(10), "/srv/pp": known(20)})
+	if got["/srv/p"].Bytes != 10 || got["/srv/pp"].Bytes != 20 {
+		t.Errorf("/srv/pp is not inside /srv/p: %+v", got)
+	}
+}
+
+// TestProjectFolders is the case with a folder that contains a bind mount and a
+// nested project: every byte is counted once.
+func TestProjectFolders(t *testing.T) {
+	u := aggregateDisk(diskInput{
+		Containers: []DiskContainer{
+			// project A: folder /srv/a, its container binds a directory inside the folder
+			{ID: "a1", Name: "a-web-1", Project: "a", WorkDir: "/srv/a", LogKnown: true, Binds: []string{"/srv/a/data"}},
+			// project B lives inside A's folder
+			{ID: "b1", Name: "b-web-1", Project: "b", WorkDir: "/srv/a/b", LogKnown: true},
+			// a bind outside every project folder
+			{ID: "a2", Name: "a-db-1", Project: "a", WorkDir: "/srv/a", LogKnown: true, Binds: []string{"/srv/other"}},
+		},
+		Sizes: map[string]sizeInfo{
+			"/srv/a":     known(1000), // includes /srv/a/data and /srv/a/b
+			"/srv/a/b":   known(300),
+			"/srv/other": known(50),
+		},
+	}, time.Now())
+
+	a := findProject(t, u, "a")
+	b := findProject(t, u, "b")
+	if a.Files != 700 || b.Files != 300 {
+		t.Errorf("files: a %d, b %d, want 700 and 300 (b is inside a, counted once)", a.Files, b.Files)
+	}
+	if a.Binds != 50 || b.Binds != 0 {
+		t.Errorf("binds: a %d, b %d, want 50 and 0 (the bind inside the folder is part of the files)", a.Binds, b.Binds)
+	}
+	if u.FilesTotal != 1000 || u.BindsTotal != 50 {
+		t.Errorf("totals: files %d binds %d, want 1000 and 50", u.FilesTotal, u.BindsTotal)
+	}
+	if u.DockerTotal != 1050 {
+		t.Errorf("DockerTotal = %d, want 1050 (nothing counted twice)", u.DockerTotal)
+	}
+	if len(u.Folders) != 2 || len(u.Binds) != 1 || u.Binds[0].Path != "/srv/other" {
+		t.Errorf("folders %+v binds %+v", u.Folders, u.Binds)
+	}
+	if bytes, unknown := u.FilesOf("a"); bytes != 700 || unknown {
+		t.Errorf("FilesOf(a) = %d, %v", bytes, unknown)
+	}
+	if bytes, _ := u.FilesOf("nope"); bytes != 0 {
+		t.Errorf("FilesOf(nope) = %d", bytes)
+	}
+	// per-container figures do not include the folder (it belongs to the project)
+	if got := u.ByContainer["a1"].Files; got != 0 {
+		t.Errorf("a container has no files of its own: %d", got)
+	}
+	if a.Total() != 700+50 || a.Complete() == false {
+		t.Errorf("project total must include files: %+v", a)
+	}
+}
+
+func TestProjectFolderSharedByTwoProjects(t *testing.T) {
+	u := aggregateDisk(diskInput{
+		Containers: []DiskContainer{
+			{ID: "1", Name: "one", Project: "p1", WorkDir: "/srv/x", LogKnown: true},
+			{ID: "2", Name: "two", Project: "p2", WorkDir: "/srv/x", LogKnown: true},
+		},
+		Sizes: map[string]sizeInfo{"/srv/x": known(100)},
+	}, time.Now())
+	if findProject(t, u, "p1").Files != 50 || findProject(t, u, "p2").Files != 50 || u.FilesTotal != 100 {
+		t.Errorf("shared folder is split evenly and counted once: %+v", u.Projects)
+	}
+}
+
+func TestSizeCache(t *testing.T) {
+	c := newSizeCache(30 * time.Minute)
+	t0 := time.Unix(1000, 0)
+	var walked []string
+	walk := func(sizes map[string]sizeInfo) func(string) sizeInfo {
+		return func(root string) sizeInfo {
+			walked = append(walked, root)
+			return sizes[root]
+		}
+	}
+
+	// first time: everything is walked
+	got, oldest := c.sizes([]string{"/a", "/b"}, t0, walk(map[string]sizeInfo{"/a": known(10), "/b": known(20)}))
+	if !reflect.DeepEqual(walked, []string{"/a", "/b"}) || got["/a"].Bytes != 10 || !oldest.Equal(t0) {
+		t.Fatalf("first run: walked %v got %v oldest %v", walked, got, oldest)
+	}
+
+	// 5 minutes later: reused, nothing is walked, new sizes are ignored
+	walked = nil
+	got, oldest = c.sizes([]string{"/a", "/b"}, t0.Add(5*time.Minute), walk(map[string]sizeInfo{"/a": known(99), "/b": known(99)}))
+	if len(walked) != 0 || got["/a"].Bytes != 10 || !oldest.Equal(t0) {
+		t.Errorf("within 30 minutes: walked %v got %v oldest %v", walked, got, oldest)
+	}
+
+	// a new root is walked at once, the old ones are still reused
+	walked = nil
+	got, _ = c.sizes([]string{"/a", "/c"}, t0.Add(6*time.Minute), walk(map[string]sizeInfo{"/c": known(7)}))
+	if !reflect.DeepEqual(walked, []string{"/c"}) || got["/c"].Bytes != 7 {
+		t.Errorf("new root: walked %v got %v", walked, got)
+	}
+	if _, ok := c.entries["/b"]; ok {
+		t.Error("a root that is gone must be forgotten")
+	}
+
+	// after 30 minutes /a is walked again
+	walked = nil
+	got, _ = c.sizes([]string{"/a"}, t0.Add(31*time.Minute), walk(map[string]sizeInfo{"/a": known(11)}))
+	if !reflect.DeepEqual(walked, []string{"/a"}) || got["/a"].Bytes != 11 {
+		t.Errorf("after 30 minutes: walked %v got %v", walked, got)
+	}
+
+	// a partial walk is not cached as fresh, and the older complete value wins
+	walked = nil
+	later := t0.Add(62 * time.Minute)
+	partial := map[string]sizeInfo{"/a": {Bytes: 3, Known: false}}
+	got, oldest = c.sizes([]string{"/a"}, later, walk(partial))
+	if got["/a"].Bytes != 11 || !got["/a"].Known || !oldest.Equal(t0.Add(31*time.Minute)) {
+		t.Errorf("stale but complete must win over partial: %+v oldest %v", got["/a"], oldest)
+	}
+	walked = nil
+	c.sizes([]string{"/a"}, later.Add(5*time.Minute), walk(partial))
+	if len(walked) != 1 {
+		t.Errorf("the partial result must be retried at the next refresh, walked %v", walked)
+	}
+
+	// no older value: the partial one is shown, marked unknown, and retried
+	c2 := newSizeCache(30 * time.Minute)
+	got, _ = c2.sizes([]string{"/x"}, t0, walk(map[string]sizeInfo{"/x": {Bytes: 4, Known: false}}))
+	if got["/x"].Known || got["/x"].Bytes != 4 {
+		t.Errorf("partial without history: %+v", got["/x"])
+	}
+	if _, ok := c2.entries["/x"]; ok {
+		t.Error("a partial result must not be cached")
 	}
 }
 

@@ -622,3 +622,35 @@ func TestDiskSummaryLine(t *testing.T) {
 		t.Errorf("screen has %d lines, want 30", n)
 	}
 }
+
+func TestProjectRowIncludesFolderFiles(t *testing.T) {
+	cs := []collector.Container{
+		{ID: "id-a", Name: "p-a-1", Project: "p", Service: "a", State: "running", Status: "Up 1 hour"},
+	}
+	disk := &collector.DiskUsage{
+		ByContainer: map[string]collector.DiskParts{"id-a": {Layers: 100 << 20}},
+		Projects: []collector.ProjectDisk{
+			{Name: "p", DiskParts: collector.DiskParts{Layers: 100 << 20, Files: 900 << 20}},
+		},
+	}
+
+	rows := containerRows(cs, disk, nil)
+	if rows[0].cells[4] != "1000.0M" && rows[0].cells[4] != "1.0G" {
+		t.Errorf("the project row is containers + folder (100M + 900M): %q", rows[0].cells[4])
+	}
+	if rows[1].cells[4] != "100.0M" {
+		t.Errorf("the container row has no files: %q", rows[1].cells[4])
+	}
+
+	disk.Projects[0].FilesUnknown = true
+	if got := containerRows(cs, disk, nil)[0].cells[4]; !strings.HasSuffix(got, "+?") {
+		t.Errorf("an unknown folder size makes the project total incomplete: %q", got)
+	}
+
+	// standalone containers have no project folder
+	solo := []collector.Container{{ID: "id-s", Name: "solo", State: "running"}}
+	d2 := &collector.DiskUsage{ByContainer: map[string]collector.DiskParts{"id-s": {Layers: 1 << 20}}}
+	if got := containerRows(solo, d2, nil)[0].cells[4]; got != "1.0M" {
+		t.Errorf("standalone header = %q, want 1.0M", got)
+	}
+}

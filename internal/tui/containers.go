@@ -163,7 +163,9 @@ func diskCell(id string, disk *collector.DiskUsage, diskErr error) string {
 	return format.BytesPartial(p.Total(), !p.Complete())
 }
 
-// groupDiskCell is the DISK text of a project row: the total of its containers.
+// groupDiskCell is the DISK text of a project row: its containers plus the
+// project folder. The folder belongs to the project, not to one container, so
+// a project row can be bigger than the sum of the rows below it.
 func groupDiskCell(g group, disk *collector.DiskUsage, diskErr error) string {
 	if disk == nil {
 		return diskCell("", nil, diskErr)
@@ -177,6 +179,11 @@ func groupDiskCell(g group, disk *collector.DiskUsage, diskErr error) string {
 		}
 		total += p.Total()
 		unknown = unknown || !p.Complete()
+	}
+	if len(g.containers) > 0 && g.containers[0].Project != "" {
+		files, filesUnknown := disk.FilesOf(g.containers[0].Project)
+		total += files
+		unknown = unknown || filesUnknown
 	}
 	return format.BytesPartial(total, unknown)
 }
