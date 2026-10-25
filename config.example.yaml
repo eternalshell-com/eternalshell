@@ -3,16 +3,20 @@
 # Copy to /etc/eternalshell/config.yaml (or ./config.yaml for local tests) and
 # restrict it: chmod 600 /etc/eternalshell/config.yaml
 #
-# The TUI (`eternalshell`) works without a config. Only the watcher and
-# `eternalshell test-mail` need one.
+# The TUI (`eternalshell`) works without a config. `eternalshell watch` and
+# `eternalshell test-mail` need one, including the smtp section.
 
 server:
   name: main-vps          # shown in mails; defaults to the host name
 
 alerts:
   cpu:
-    process: { percent: 80, duration: 15m }   # one process above 80 % of one core
-    total:   { percent: 90, duration: 10m }   # the whole server above 90 %
+    # `watch` samples every 10 s. An alert needs the AVERAGE over the whole
+    # duration to reach the percentage, so a short spike never fires. Use a
+    # duration of at least 10s. One mail per incident, one all-clear mail when
+    # the average of the last minute is below the threshold again.
+    process: { percent: 80, duration: 15m }   # one process, 100 = one full core
+    total:   { percent: 90, duration: 10m }   # the whole server, 100 = all cores
   ssh:
     allowed_users: [philip]
     allowed_ips: [203.0.113.10]               # addresses or CIDR ranges

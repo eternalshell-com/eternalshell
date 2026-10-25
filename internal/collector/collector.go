@@ -23,6 +23,12 @@ type Process struct {
 	RSS  uint64 // resident memory in bytes
 	PPID int32
 
+	// Start is the process start time in clock ticks since boot. Together with
+	// the PID it identifies one process: a reused PID has a different Start.
+	Start   uint64
+	Cmdline string // full command line, capped; empty for kernel threads
+	User    string // owner of the process
+
 	// CPU is only meaningful if CPUKnown is set. It is unknown for the first
 	// snapshot and for processes that appeared since the previous one.
 	CPU      float64
@@ -64,10 +70,12 @@ type Snapshot struct {
 // procMeta is what we remember about a process so it is read only once:
 // things that do not change while the process lives.
 type procMeta struct {
-	start  uint64 // identifies the process; a reused PID has a different start
-	name   string
-	kernel bool
-	origin Origin
+	start   uint64 // identifies the process; a reused PID has a different start
+	name    string
+	cmdline string
+	user    string
+	kernel  bool
+	origin  Origin
 }
 
 // procTimes is the part of the previous sample needed to compute CPU deltas.
@@ -203,6 +211,10 @@ func (c *Collector) sweep(cur *sample) ([]Process, error) {
 			RSS:    st.rssPages * c.pageSize,
 			Kernel: m.kernel,
 			Origin: m.origin,
+
+			Start:   st.start,
+			Cmdline: m.cmdline,
+			User:    m.user,
 		}
 		if c.prev != nil {
 			if before, ok := c.prev.procs[pid]; ok {
@@ -225,10 +237,12 @@ func (c *Collector) sweep(cur *sample) ([]Process, error) {
 func newMeta(pid int32, st procStat) procMeta {
 	cmdline := readCmdline(pid)
 	return procMeta{
-		start:  st.start,
-		name:   processName(st.comm, cmdline),
-		kernel: isKernelThread(pid, st.ppid, cmdline),
-		origin: readOrigin(pid),
+		start:   st.start,
+		name:    processName(st.comm, cmdline),
+		cmdline: joinCmdline(cmdline),
+		user:    readUser(pid),
+		kernel:  isKernelThread(pid, st.ppid, cmdline),
+		origin:  readOrigin(pid),
 	}
 }
 

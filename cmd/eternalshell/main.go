@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -18,6 +19,7 @@ import (
 	"eternalshell/internal/format"
 	"eternalshell/internal/mail"
 	"eternalshell/internal/tui"
+	"eternalshell/internal/watch"
 )
 
 const usage = `Usage: eternalshell [command]
@@ -26,6 +28,9 @@ Without a command, eternalshell opens the live terminal UI.
 
 Commands:
   status    print CPU, load, memory, disks and the top 5 processes
+  watch [--config path]
+            run in the foreground and mail CPU alerts (one process or the whole
+            server above the thresholds in alerts.cpu); sampled every 10 s
   test-mail [--config path]
             send one test mail with the smtp settings from the config file
             (default: /etc/eternalshell/config.yaml, then ./config.yaml)
@@ -40,6 +45,8 @@ func main() {
 		err = runStatus()
 	case os.Args[1] == "test-mail":
 		err = runTestMail(os.Args[2:])
+	case os.Args[1] == "watch":
+		err = runWatch(os.Args[2:])
 	default:
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
@@ -86,20 +93,22 @@ func runStatus() error {
 	return nil
 }
 
-// runTestMail sends one mail to check the smtp section of the config.
-func runTestMail(args []string) error {
-	fs := flag.NewFlagSet("test-mail", flag.ContinueOnError)
+// loadMailConfig parses "--config path" for a command that sends mail, then
+// finds, loads and checks the config and reads the SMTP password from the
+// environment. It prints which config file is used and warns about its mode.
+func loadMailConfig(command string, args []string) (*config.Config, string, error) {
+	fs := flag.NewFlagSet(command, flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to the config file")
 	if err := fs.Parse(args); err != nil {
-		return err
+		return nil, "", err
 	}
 	if fs.NArg() > 0 {
-		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+		return nil, "", fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
 
 	path, err := config.Find(*configPath)
 	if err != nil {
-		return err
+		return nil, "", err
 	}
 	fmt.Println("Config:", path)
 	if w := config.PermissionWarning(path); w != "" {
@@ -108,12 +117,21 @@ func runTestMail(args []string) error {
 
 	cfg, err := config.Load(path)
 	if err != nil {
-		return err
+		return nil, "", err
 	}
 	if err := cfg.ValidateSMTP(); err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return nil, "", fmt.Errorf("%s: %w", path, err)
 	}
 	password, err := cfg.SMTP.Password()
+	if err != nil {
+		return nil, "", err
+	}
+	return cfg, password, nil
+}
+
+// runTestMail sends one mail to check the smtp section of the config.
+func runTestMail(args []string) error {
+	cfg, password, err := loadMailConfig("test-mail", args)
 	if err != nil {
 		return err
 	}
@@ -130,4 +148,21 @@ func runTestMail(args []string) error {
 	}
 	fmt.Println("OK: the mail server accepted the message. Check the inbox (and the spam folder).")
 	return nil
+}
+
+// runWatch runs the watcher in the foreground until Ctrl+C or SIGTERM.
+// It refuses to start without working mail settings: a watcher that cannot
+// mail would only look like it protects the server.
+func runWatch(args []string) error {
+	cfg, password, err := loadMailConfig("watch", args)
+	if err != nil {
+		return err
+	}
+
+	c := collector.New()
+	defer c.Close()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return watch.Run(ctx, watch.Options{Config: cfg, Password: password, Collector: c, Out: os.Stdout})
 }

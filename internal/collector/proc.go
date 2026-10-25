@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/user"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // This file reads /proc directly for the values that are needed for every
@@ -140,4 +142,34 @@ func readCPUTimes() (busy, total float64, err error) {
 		return 0, 0, err
 	}
 	return parseCPULine(line)
+}
+
+// maxCmdlineLen caps the stored command line; some processes have huge ones.
+const maxCmdlineLen = 500
+
+// joinCmdline makes the command line one line of text, cut at maxCmdlineLen.
+func joinCmdline(args []string) string {
+	s := strings.Join(args, " ")
+	if r := []rune(s); len(r) > maxCmdlineLen {
+		s = string(r[:maxCmdlineLen]) + "…"
+	}
+	return s
+}
+
+// readUser returns the name of the user who owns a process: the owner of its
+// /proc/<pid> directory. If the name is unknown, the numeric ID is returned.
+func readUser(pid int32) string {
+	info, err := os.Stat(fmt.Sprintf("/proc/%d", pid))
+	if err != nil {
+		return ""
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return ""
+	}
+	uid := strconv.FormatUint(uint64(st.Uid), 10)
+	if u, err := user.LookupId(uid); err == nil {
+		return u.Username
+	}
+	return uid
 }
