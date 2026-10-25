@@ -274,7 +274,8 @@ func TestPermissionWarning(t *testing.T) {
 	}{
 		{0o600, false},
 		{0o400, false},
-		{0o640, true}, // group can read
+		{0o640, false}, // group read is fine (root:eternalshell 0640 for the service)
+		{0o660, true},  // group can write
 		{0o644, true},
 		{0o606, true}, // others can read
 		{0o666, true},
@@ -287,7 +288,7 @@ func TestPermissionWarning(t *testing.T) {
 		if (got != "") != tt.warn {
 			t.Errorf("mode %04o: warning = %q, want warning: %v", tt.mode, got, tt.warn)
 		}
-		if tt.warn && (!strings.Contains(got, "chmod 600") || !strings.Contains(got, path)) {
+		if tt.warn && (!strings.Contains(got, "chmod 640") || !strings.Contains(got, path)) {
 			t.Errorf("mode %04o: warning should give the fix: %q", tt.mode, got)
 		}
 	}

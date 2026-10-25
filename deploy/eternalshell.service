@@ -1,0 +1,69 @@
+# EternalShell watcher: samples the server and mails CPU alerts.
+# Installed by deploy/install.sh to /etc/systemd/system/eternalshell.service.
+#
+# Secrets: the SMTP password is NOT in this file or in config.yaml. It lives in
+# /etc/eternalshell/secret.env (root, 0600) and systemd (running as root) hands
+# it to the service as an environment variable.
+#
+# Docker: the service user is in the "docker" group so it can read container
+# names and compose labels. Access to the Docker socket is root-equivalent;
+# EternalShell only makes read-only API calls, but the group membership itself
+# is powerful. A read-only socket proxy is the safer alternative.
+
+[Unit]
+Description=EternalShell watcher (CPU alerts by mail)
+Wants=network-online.target
+After=network-online.target docker.service
+# A broken config makes the service exit at start. Stop retrying after 5 tries
+# in 10 minutes instead of looping forever.
+StartLimitIntervalSec=10min
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=eternalshell
+Group=eternalshell
+EnvironmentFile=/etc/eternalshell/secret.env
+ExecStart=/usr/local/bin/eternalshell watch --config /etc/eternalshell/config.yaml
+
+# Restart after a crash or a failed start, not after a normal stop.
+Restart=on-failure
+RestartSec=30s
+
+# Logs go to the journal: journalctl -u eternalshell -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=eternalshell
+
+# --- Hardening -------------------------------------------------------------
+# The watcher must read /proc of ALL processes (CPU, command line, cgroup), so
+# ProtectProc= and ProcSubset= are deliberately NOT used.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+MemoryMax=256M
+
+# AF_UNIX: Docker socket. AF_INET/AF_INET6: SMTP and DNS.
+# If DNS or SMTP fails under this unit with "address family not supported",
+# add AF_NETLINK here. It is not added up front.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# Reading /proc of other users' processes needs no capability.
+CapabilityBoundingSet=
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+UMask=0077
+
+# No write access anywhere: the watcher keeps its state in memory only.
+# (When an event log is added later, StateDirectory=eternalshell goes here.)
+
+[Install]
+WantedBy=multi-user.target

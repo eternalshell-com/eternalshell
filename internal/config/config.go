@@ -124,18 +124,20 @@ func unwrapPathError(err error) error {
 	return err
 }
 
-// PermissionWarning returns a warning text if the file can be read or written by
-// anyone but its owner, and "" if the permissions are fine (e.g. 600).
+// PermissionWarning returns a warning text if the file is open to more than it
+// should be, and "" if the permissions are fine. Fine means: no access for
+// others and no write access for the group. Group read (0640) is allowed: the
+// service runs as a user whose group owns the file.
 func PermissionWarning(path string) string {
 	info, err := os.Stat(path)
 	if err != nil {
 		return ""
 	}
 	mode := info.Mode().Perm()
-	if mode&0o077 == 0 {
+	if mode&0o027 == 0 {
 		return ""
 	}
-	return fmt.Sprintf("%s is accessible by other users (mode %04o); restrict it with: chmod 600 %s", path, mode, path)
+	return fmt.Sprintf("%s is accessible by other users (mode %04o); restrict it with: chmod 640 %s (or 600)", path, mode, path)
 }
 
 // Load reads, parses and validates the config file at path.
