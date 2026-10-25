@@ -1,9 +1,13 @@
 package tui
 
 import (
+	"fmt"
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
+
+	"github.com/charmbracelet/lipgloss"
 
 	"eternalshell/internal/collector"
 	"eternalshell/internal/format"
@@ -15,27 +19,75 @@ const standaloneGroup = "standalone"
 // counts as a problem. Same default as the process alert in the concept.
 const highCPU = 80
 
-// Fixed column widths. The list draws a gap of colGap between columns and one
-// space at the left edge.
+// Column widths. The list draws a gap of colGap between columns and one space
+// at the left edge. cellPad is what the bubbles table adds per column (the
+// processes view).
 const (
-	statusW   = 26
-	cpuW      = 6
+	dotW      = 2
+	cpuW      = 5
 	memW      = 8
 	diskW     = 9
 	restartsW = 8
 	colGap    = 2
-	cellPad   = 2 // padding the bubbles table adds per column (processes view)
+	cellPad   = 2
+
+	// rightMargin is the space kept free at the right edge of a list, so the last
+	// column does not touch the border.
+	rightMargin = 1
 )
 
+// Column indexes of the containers list.
+const (
+	colDot = iota
+	colName
+	colStatus
+	colCPU
+	colTrend
+	colMem
+	colDisk
+	colRestarts
+)
+
+// containerLayouts are the widths to try, widest first: whether the trend
+// column is shown, how wide STATUS may be and how much room the name needs at
+// least. The first one that fits is used, so the trend column goes first when
+// space is tight, then STATUS shrinks. The name gets what is left.
+var containerLayouts = []struct{ trend, status, nameMin int }{
+	{sparkWidth, 26, 24},
+	{0, 26, 22},
+	{0, 20, 20},
+	{0, 14, 18},
+	{0, 12, 12},
+}
+
 func containerColumns(width int) []listColumn {
-	fixed := statusW + cpuW + memW + diskW + restartsW + 5*colGap + 1
+	width -= rightMargin
+	pick := containerLayouts[len(containerLayouts)-1]
+	for _, c := range containerLayouts {
+		cols := 7 // dot, name, status, cpu, mem, disk, restarts
+		if c.trend > 0 {
+			cols++
+		}
+		need := 1 + (cols-1)*colGap + dotW + cpuW + memW + diskW + restartsW + c.status + c.trend + c.nameMin
+		if need <= width {
+			pick = c
+			break
+		}
+	}
+	cols := 7
+	if pick.trend > 0 {
+		cols++
+	}
+	rest := width - (1 + (cols-1)*colGap + dotW + cpuW + memW + diskW + restartsW + pick.status + pick.trend)
 	return []listColumn{
-		{"PROJECT / CONTAINER", max(width-fixed, 20)},
-		{"STATUS", statusW},
-		{"CPU", cpuW},
-		{"MEM", memW},
-		{"DISK", diskW},
-		{"RESTARTS", restartsW},
+		colDot:      {"", dotW},
+		colName:     {"PROJECT / CONTAINER", max(rest, 6)},
+		colStatus:   {"STATUS", pick.status},
+		colCPU:      {"CPU", cpuW},
+		colTrend:    {"TREND", pick.trend},
+		colMem:      {"MEM", memW},
+		colDisk:     {"DISK", diskW},
+		colRestarts: {"RESTARTS", restartsW},
 	}
 }
 
@@ -130,17 +182,29 @@ func groupContainers(cs []collector.Container) []group {
 
 // containerRows builds the list rows: a header row per group, then its
 // containers. disk is the latest Docker disk usage (nil until the first
-// background result, then the DISK cells show "…" or "-" if it failed).
-func containerRows(cs []collector.Container, disk *collector.DiskUsage, diskErr error) []listRow {
+// background result, then the DISK cells show "…" or "-" if it failed). hist is
+// the recent CPU of each container, for the trend column.
+func containerRows(cs []collector.Container, disk *collector.DiskUsage, diskErr error, hist map[string][]float64) []listRow {
 	var rows []listRow
 	for _, g := range groupContainers(cs) {
-		title := g.name
+		// The project row: name, how many containers it has, and the sum of
+		// their trends. A problem somewhere inside is marked and turns it red.
+		title := fmt.Sprintf("%s (%d)", g.name, len(g.containers))
 		if g.problem {
 			title += " !"
 		}
-		rows = append(rows, listRow{cells: []string{title, "", "", "", groupDiskCell(g, disk, diskErr)}, header: true, warn: g.problem})
+		series := make([][]float64, 0, len(g.containers))
 		for _, c := range g.containers {
-			rows = append(rows, containerRow(c, diskCell(c.ID, disk, diskErr)))
+			series = append(series, hist[c.ID])
+		}
+		head := make([]string, colRestarts+1)
+		head[colName] = title
+		head[colTrend] = trendCell(sumSeries(series...))
+		head[colDisk] = groupDiskCell(g, disk, diskErr)
+		rows = append(rows, listRow{cells: head, header: true, warn: g.problem})
+
+		for _, c := range g.containers {
+			rows = append(rows, containerRow(c, diskCell(c.ID, disk, diskErr), hist[c.ID]))
 		}
 	}
 	return rows
@@ -188,7 +252,74 @@ func groupDiskCell(g group, disk *collector.DiskUsage, diskErr error) string {
 	return format.BytesPartial(total, unknown)
 }
 
-func containerRow(c collector.Container, disk string) listRow {
+// dotKind is what the status dot of a container says.
+type dotKind int
+
+const (
+	dotStopped dotKind = iota // stopped cleanly or only created: grey
+	dotRunning                // running: green (with a check mark when healthy)
+	dotWarn                   // unhealthy or restarting: yellow
+	dotBad                    // exited badly or dead: red
+)
+
+// health reads the health state out of a Docker status like "Up 2 weeks (healthy)".
+func health(status string) (healthy, unhealthy bool) {
+	return strings.Contains(status, "(healthy)"), strings.Contains(status, "(unhealthy)")
+}
+
+// containerDot decides the kind of dot for a container and whether it gets a
+// check mark. "Exited badly" is the same rule as for the problem marker: an exit
+// code other than 0 or 143.
+func containerDot(c collector.Container) (kind dotKind, healthy bool) {
+	h, unhealthy := health(c.Status)
+	switch {
+	case c.Running() && unhealthy:
+		return dotWarn, false
+	case c.Running():
+		return dotRunning, h
+	case c.State == "restarting":
+		return dotWarn, false
+	case c.State == "dead":
+		return dotBad, false
+	case c.State == "exited":
+		code, ok := exitCode(c.Status)
+		if !ok || (code != 0 && code != 143) {
+			return dotBad, false
+		}
+	}
+	return dotStopped, false
+}
+
+// dotCell returns the text of the dot column and its style. In plain mode (no
+// colors) the shapes differ instead: ● running, ◐ unhealthy or restarting,
+// ✕ exited badly or dead, ○ stopped.
+func dotCell(c collector.Container) (string, *lipgloss.Style) {
+	kind, healthy := containerDot(c)
+	plain := plainMode()
+
+	glyph, style := "●", &greenCell
+	switch kind {
+	case dotWarn:
+		style = &yellowCell
+		if plain {
+			glyph = "◐"
+		}
+	case dotBad:
+		style = &redCell
+		if plain {
+			glyph = "✕"
+		}
+	case dotStopped:
+		glyph, style = "○", &dimStyle
+	}
+	mark := " "
+	if healthy {
+		mark = "✓"
+	}
+	return glyph + mark, style
+}
+
+func containerRow(c collector.Container, disk string, history []float64) listRow {
 	// Inside a compose project the service name is shorter and clearer than
 	// the generated container name ("project-service-1").
 	name := c.Name
@@ -198,20 +329,27 @@ func containerRow(c collector.Container, disk string) listRow {
 		name += " (" + c.Image + ")" // without a project the image says what it is
 	}
 
-	marker := "○"
-	cpu, mem := "-", "-"
+	cpu, mem, trend := "-", "-", ""
 	if c.Running() {
-		marker = "●"
 		if c.CPUKnown {
 			cpu = format.Percent(c.CPU)
 		}
 		if c.MemOK {
 			mem = format.Bytes(c.MemBytes)
 		}
+		trend = trendCell(history)
 	}
-	return listRow{
-		cells: []string{"  " + marker + " " + name, c.Status, cpu, mem, disk, strconv.Itoa(c.Restarts)},
-		dim:   !c.Running(),
-		id:    c.ID,
+
+	dot, dotStyle := dotCell(c)
+	cells := make([]string, colRestarts+1)
+	cells[colDot], cells[colName], cells[colStatus] = dot, name, c.Status
+	cells[colCPU], cells[colTrend], cells[colMem] = cpu, trend, mem
+	cells[colDisk], cells[colRestarts] = disk, strconv.Itoa(c.Restarts)
+
+	styles := make([]*lipgloss.Style, colRestarts+1)
+	styles[colDot] = dotStyle
+	if c.Running() {
+		styles[colTrend] = &accentStyle
 	}
+	return listRow{cells: cells, styles: styles, dim: !c.Running(), id: c.ID}
 }

@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 
 	"eternalshell/internal/collector"
 	"eternalshell/internal/domains"
@@ -71,18 +72,43 @@ func domainHosts(cs []collector.Container) []domainHost {
 	return out
 }
 
-// domainColumns sizes the columns. DOMAIN and TARGET share what is left, so on
-// a narrow terminal the CERT column at the right edge stays complete.
-func domainColumns(width int) []listColumn {
-	const projectW, statusW, certW, domainMin, targetMax, targetMin = 14, 9, 23, 20, 28, 8
-	others := projectW + statusW + certW + 4*colGap + 1
-	targetW := min(targetMax, max(width-others-domainMin, targetMin))
+// Domain column widths. PROJECT takes the room its longest name needs, TARGET
+// gets what is left and disappears when there is not enough.
+const (
+	domStatusW   = 9
+	domCertW     = 23
+	domProjectMn = 7
+	domProjectMx = 24
+	domTargetMn  = 8
+	domTargetMx  = 28
+	domDomainMn  = 24
+)
+
+// domainColumns sizes the columns for a list of the given width. projectW is
+// the width of the longest project name.
+func domainColumns(width, projectW int) []listColumn {
+	width -= rightMargin
+	projectW = min(max(projectW, domProjectMn), domProjectMx)
+	fixed := domStatusW + domCertW + projectW
+
+	// With TARGET there are four gaps, without it three, plus the margin.
+	avail := width - 1 - 4*colGap - fixed
+	target := 0
+	if avail-domDomainMn >= domTargetMn {
+		target = min(avail-domDomainMn, domTargetMx)
+	} else {
+		avail = width - 1 - 3*colGap - fixed
+	}
+	domain := avail
+	if target > 0 {
+		domain = avail - target
+	}
 	return []listColumn{
-		{"DOMAIN", max(width-others-targetW, domainMin)},
+		{"DOMAIN", max(domain, 12)},
 		{"PROJECT", projectW},
-		{"STATUS", statusW},
-		{"TARGET", targetW},
-		{"CERT", certW},
+		{"STATUS", domStatusW},
+		{"TARGET", target},
+		{"CERT", domCertW},
 	}
 }
 
@@ -118,8 +144,6 @@ func domainRows(hosts []domainHost, results map[string]domains.Result, now time.
 			row.cells[3] = e.res.Location // only a 3xx response has one
 			row.cells[4] = e.res.CertText(now)
 			row.styles = []*lipgloss.Style{nil, nil, levelStyle(e.res.StatusLevel()), nil, levelStyle(e.res.CertLevel(now))}
-		} else {
-			row.styles = []*lipgloss.Style{nil, nil, nil, nil, nil}
 		}
 		rows = append(rows, row)
 	}
@@ -189,7 +213,13 @@ func (m *Model) refreshDomainRows() {
 	if m.snap == nil {
 		return
 	}
-	m.domainList.setRows(domainRows(domainHosts(m.snap.Containers), m.domains.results, time.Now()))
+	hosts := domainHosts(m.snap.Containers)
+	longest := 0
+	for _, h := range hosts {
+		longest = max(longest, runewidth.StringWidth(h.Project))
+	}
+	m.domainList.cols = domainColumns(m.innerWidth(), longest)
+	m.domainList.setRows(domainRows(hosts, m.domains.results, time.Now()))
 }
 
 // domainSummaryView is the line under the table in the Domains view.

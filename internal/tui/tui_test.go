@@ -30,32 +30,36 @@ func fakeSnapshot() *collector.Snapshot {
 }
 
 func TestContainerRows(t *testing.T) {
-	rows := containerRows(fakeSnapshot().Containers, nil, nil)
+	rows := containerRows(fakeSnapshot().Containers, nil, nil, nil)
 
 	// two group headers + three containers
 	if len(rows) != 5 {
 		t.Fatalf("len(rows) = %d, want 5: %v", len(rows), rows)
 	}
-	if rows[0].cells[0] != "lienks-app" || rows[3].cells[0] != standaloneGroup {
-		t.Errorf("group headers wrong: %q, %q", rows[0].cells[0], rows[3].cells[0])
+	if rows[0].cells[colName] != "lienks-app (2)" || rows[3].cells[colName] != standaloneGroup+" (1)" {
+		t.Errorf("group headers wrong (name and container count): %q, %q", rows[0].cells[colName], rows[3].cells[colName])
 	}
-	if got := rows[1].cells[0]; got != "  ● app" { // service name inside a project
+	if got := rows[1].cells[colName]; got != "app" { // service name inside a project
 		t.Errorf("row 1 name = %q", got)
 	}
-	if rows[1].cells[2] != "12%" || rows[1].cells[3] != "90.0M" {
-		t.Errorf("row 1 cpu/mem = %q/%q", rows[1].cells[2], rows[1].cells[3])
+	if got := rows[1].cells[colDot]; got != "●✓" { // running and healthy
+		t.Errorf("row 1 dot = %q, want ●✓", got)
+	}
+	if rows[1].cells[colCPU] != "12%" || rows[1].cells[colMem] != "90.0M" {
+		t.Errorf("row 1 cpu/mem = %q/%q", rows[1].cells[colCPU], rows[1].cells[colMem])
 	}
 	// stopped container: no CPU/MEM, but restarts are shown
-	if rows[2].cells[0] != "  ○ cron" || rows[2].cells[2] != "-" || rows[2].cells[3] != "-" || rows[2].cells[5] != "3" {
-		t.Errorf("stopped row = %v", rows[2].cells)
+	if rows[2].cells[colName] != "cron" || rows[2].cells[colDot] != "○ " ||
+		rows[2].cells[colCPU] != "-" || rows[2].cells[colMem] != "-" || rows[2].cells[colRestarts] != "3" {
+		t.Errorf("stopped row = %q", rows[2].cells)
 	}
-	if got := rows[4].cells[0]; got != "  ● traefik (traefik:v3.1)" {
+	if got := rows[4].cells[colName]; got != "traefik (traefik:v3.1)" {
 		t.Errorf("standalone name = %q", got)
 	}
 }
 
 func TestProcessRows(t *testing.T) {
-	rows := processRows(fakeSnapshot().Processes, false)
+	rows := processRows(fakeSnapshot().Processes, false, nil, false)
 	if len(rows) != 2 {
 		t.Fatalf("len(rows) = %d", len(rows))
 	}
@@ -89,7 +93,7 @@ func TestViewSwitching(t *testing.T) {
 	m := ready(t, fakeSnapshot())
 
 	out := m.View()
-	for _, want := range []string{"[1 Containers]", "lienks-app", "healthy", "traefik", "CPU 6%", "disk / 84%"} {
+	for _, want := range []string{"[1 Containers]", "lienks-app", "healthy", "traefik", "CPU ▕", "  6%", "DISK ▕", " 84%"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("containers view missing %q:\n%s", want, out)
 		}
@@ -219,9 +223,9 @@ func TestGroupOrder(t *testing.T) {
 		t.Errorf("standalone problem container should come first: %+v", groups[1].containers)
 	}
 
-	rows := containerRows(cs, nil, nil)
-	if rows[0].cells[0] != "beta !" {
-		t.Errorf("first header = %q, want %q", rows[0].cells[0], "beta !")
+	rows := containerRows(cs, nil, nil, nil)
+	if rows[0].cells[colName] != "beta (2) !" {
+		t.Errorf("first header = %q, want %q", rows[0].cells[colName], "beta (2) !")
 	}
 }
 
@@ -338,14 +342,14 @@ func TestUnknownCPUShowsDash(t *testing.T) {
 	}
 
 	m := ready(t, snap)
-	if !strings.Contains(m.View(), "CPU -") {
-		t.Errorf("header should show CPU -:\n%s", m.View())
+	if !strings.Contains(m.View(), "▏    -") { // an empty bar and a dash
+		t.Errorf("header should show an unknown CPU as an empty bar and a dash:\n%s", m.View())
 	}
-	rows := containerRows(snap.Containers, nil, nil)
-	if rows[1].cells[2] != "-" {
-		t.Errorf("running container CPU = %q, want -", rows[1].cells[2])
+	rows := containerRows(snap.Containers, nil, nil, nil)
+	if rows[1].cells[colCPU] != "-" {
+		t.Errorf("running container CPU = %q, want -", rows[1].cells[colCPU])
 	}
-	if got := processRows(snap.Processes, false)[0][2]; got != "-" {
+	if got := processRows(snap.Processes, false, nil, false)[0][2]; got != "-" {
 		t.Errorf("process CPU = %q, want -", got)
 	}
 }
@@ -536,7 +540,7 @@ func TestLogsSurviveRefreshAndResize(t *testing.T) {
 
 func TestFooterMentionsLogs(t *testing.T) {
 	m := ready(t, fakeSnapshot())
-	if !strings.Contains(m.View(), "1/2/3 switch view · ↑/↓ scroll · enter logs · q quit") {
+	if !strings.Contains(m.View(), "1/2/3 views · ↑/↓ scroll · ↵ logs · q quit") {
 		t.Errorf("footer:\n%s", m.View())
 	}
 }
@@ -556,15 +560,15 @@ func TestDiskColumn(t *testing.T) {
 	cs := fakeSnapshot().Containers
 
 	// before the first result: "…"; failed: "-"
-	rows := containerRows(cs, nil, nil)
-	if rows[1].cells[4] != "…" || rows[0].cells[4] != "…" {
-		t.Errorf("before the first result: container %q, project %q, want …", rows[1].cells[4], rows[0].cells[4])
+	rows := containerRows(cs, nil, nil, nil)
+	if rows[1].cells[colDisk] != "…" || rows[0].cells[colDisk] != "…" {
+		t.Errorf("before the first result: container %q, project %q, want …", rows[1].cells[colDisk], rows[0].cells[colDisk])
 	}
-	if rows := containerRows(cs, nil, errors.New("down")); rows[1].cells[4] != "-" {
-		t.Errorf("failed refresh: %q, want -", rows[1].cells[4])
+	if rows := containerRows(cs, nil, errors.New("down"), nil); rows[1].cells[colDisk] != "-" {
+		t.Errorf("failed refresh: %q, want -", rows[1].cells[colDisk])
 	}
 
-	rows = containerRows(cs, diskFixture(), nil)
+	rows = containerRows(cs, diskFixture(), nil, nil)
 	// project "lienks-app": app 1.0G + cron 10M and unknown logs -> 1.0G+? on the header
 	var appRow, cronRow, headerRow, traefikRow listRow
 	for _, r := range rows {
@@ -575,21 +579,21 @@ func TestDiskColumn(t *testing.T) {
 			cronRow = r
 		case r.id == "id-traefik":
 			traefikRow = r
-		case r.header && strings.HasPrefix(r.cells[0], "lienks-app"):
+		case r.header && strings.HasPrefix(r.cells[colName], "lienks-app"):
 			headerRow = r
 		}
 	}
-	if appRow.cells[4] != "1000.0M" && appRow.cells[4] != "1.0G" {
-		t.Errorf("app disk = %q", appRow.cells[4])
+	if appRow.cells[colDisk] != "1000.0M" && appRow.cells[colDisk] != "1.0G" {
+		t.Errorf("app disk = %q", appRow.cells[colDisk])
 	}
-	if cronRow.cells[4] != "10.0M+?" {
-		t.Errorf("cron disk = %q, want 10.0M+? (logs unknown)", cronRow.cells[4])
+	if cronRow.cells[colDisk] != "10.0M+?" {
+		t.Errorf("cron disk = %q, want 10.0M+? (logs unknown)", cronRow.cells[colDisk])
 	}
-	if !strings.HasSuffix(headerRow.cells[4], "+?") {
-		t.Errorf("the project row is the total of its containers and inherits the unknown: %q", headerRow.cells[4])
+	if !strings.HasSuffix(headerRow.cells[colDisk], "+?") {
+		t.Errorf("the project row is the total of its containers and inherits the unknown: %q", headerRow.cells[colDisk])
 	}
-	if traefikRow.cells[4] != "…" {
-		t.Errorf("a container missing from the last refresh shows …, got %q", traefikRow.cells[4])
+	if traefikRow.cells[colDisk] != "…" {
+		t.Errorf("a container missing from the last refresh shows …, got %q", traefikRow.cells[colDisk])
 	}
 }
 
@@ -634,23 +638,23 @@ func TestProjectRowIncludesFolderFiles(t *testing.T) {
 		},
 	}
 
-	rows := containerRows(cs, disk, nil)
-	if rows[0].cells[4] != "1000.0M" && rows[0].cells[4] != "1.0G" {
-		t.Errorf("the project row is containers + folder (100M + 900M): %q", rows[0].cells[4])
+	rows := containerRows(cs, disk, nil, nil)
+	if rows[0].cells[colDisk] != "1000.0M" && rows[0].cells[colDisk] != "1.0G" {
+		t.Errorf("the project row is containers + folder (100M + 900M): %q", rows[0].cells[colDisk])
 	}
-	if rows[1].cells[4] != "100.0M" {
-		t.Errorf("the container row has no files: %q", rows[1].cells[4])
+	if rows[1].cells[colDisk] != "100.0M" {
+		t.Errorf("the container row has no files: %q", rows[1].cells[colDisk])
 	}
 
 	disk.Projects[0].FilesUnknown = true
-	if got := containerRows(cs, disk, nil)[0].cells[4]; !strings.HasSuffix(got, "+?") {
+	if got := containerRows(cs, disk, nil, nil)[0].cells[colDisk]; !strings.HasSuffix(got, "+?") {
 		t.Errorf("an unknown folder size makes the project total incomplete: %q", got)
 	}
 
 	// standalone containers have no project folder
 	solo := []collector.Container{{ID: "id-s", Name: "solo", State: "running"}}
 	d2 := &collector.DiskUsage{ByContainer: map[string]collector.DiskParts{"id-s": {Layers: 1 << 20}}}
-	if got := containerRows(solo, d2, nil)[0].cells[4]; got != "1.0M" {
+	if got := containerRows(solo, d2, nil, nil)[0].cells[colDisk]; got != "1.0M" {
 		t.Errorf("standalone header = %q, want 1.0M", got)
 	}
 }

@@ -7,10 +7,12 @@ import (
 	"github.com/mattn/go-runewidth"
 )
 
-// The containers view needs things the bubbles table cannot do: a style per row
-// (dimmed, bold group headers) and a cursor that skips group headers. So it
-// uses this small list instead. Rows are drawn as plain text per cell, and the
-// style is applied to the whole finished line, which is safe with ANSI codes.
+// The containers and domains views need things the bubbles table cannot do: a
+// style per row (dimmed, group headers), colored single cells and a cursor that
+// skips group headers. So they use this small list instead.
+//
+// Each cell is cut and padded to its column width as plain text first, and only
+// then styled, so ANSI codes never disturb the widths.
 
 type listColumn struct {
 	title string
@@ -24,8 +26,7 @@ type listRow struct {
 	warn   bool   // group header with a problem inside
 	id     string // container ID, empty for headers
 
-	// styles colors single cells (nil entries stay plain). They are applied to
-	// the already padded cell text, so the column widths stay right.
+	// styles colors single cells (nil entries use the style of the row).
 	styles []*lipgloss.Style
 }
 
@@ -36,8 +37,6 @@ type list struct {
 	offset int // first visible row
 	width  int
 	height int // total height including the 2 header lines
-
-	plain bool // no highlight for the cursor row (scrolling still follows it)
 }
 
 const listHeaderLines = 2
@@ -141,33 +140,72 @@ func (l *list) top() { l.cursor = 0; l.fixCursor(1) }
 
 func (l *list) bottom() { l.cursor = len(l.rows) - 1; l.fixCursor(-1) }
 
-// line joins cells into one text line with fixed column widths.
-func (l *list) line(cells []string) string {
-	return " " + strings.Join(l.pad(cells), "  ")
+// visible returns the indexes of the columns that are shown. A column with a
+// width of 0 is hidden, and takes no gap either.
+func (l *list) visible() []int {
+	var out []int
+	for i, c := range l.cols {
+		if c.width > 0 {
+			out = append(out, i)
+		}
+	}
+	return out
 }
 
-// pad cuts every cell to its column width and fills it up with spaces.
-func (l *list) pad(cells []string) []string {
-	parts := make([]string, len(l.cols))
-	for i, c := range l.cols {
+// rowBase is the style of a whole row before its cells are colored.
+func rowBase(r listRow) lipgloss.Style {
+	switch {
+	case r.header && r.warn:
+		return headerWarnStyle
+	case r.header:
+		return headerStyle
+	case r.dim:
+		return dimStyle
+	}
+	return lipgloss.NewStyle()
+}
+
+// renderLine draws one row: a margin, the cells with their gaps, and spaces up
+// to the full width. The selected row gets a background over all of it, so it
+// reads as one band; without colors it starts with a marker instead.
+func (l *list) renderLine(cells []string, styles []*lipgloss.Style, base lipgloss.Style, selected bool) string {
+	if selected {
+		base = base.Background(selBg).Bold(true)
+	}
+	lead := " "
+	if selected && plainMode() {
+		lead = "▸"
+	}
+
+	var b strings.Builder
+	b.WriteString(base.Render(lead))
+	used := 1
+	for n, i := range l.visible() {
+		if n > 0 {
+			b.WriteString(base.Render(strings.Repeat(" ", colGap)))
+			used += colGap
+		}
+		c := l.cols[i]
 		text := ""
 		if i < len(cells) {
 			text = cells[i]
 		}
-		parts[i] = runewidth.FillRight(runewidth.Truncate(text, c.width, "…"), c.width)
-	}
-	return parts
-}
+		text = runewidth.FillRight(runewidth.Truncate(text, c.width, "…"), c.width)
 
-// styledLine is line with the cell colors of a row.
-func (l *list) styledLine(r listRow) string {
-	parts := l.pad(r.cells)
-	for i := range parts {
-		if i < len(r.styles) && r.styles[i] != nil {
-			parts[i] = r.styles[i].Render(parts[i])
+		st := base
+		if i < len(styles) && styles[i] != nil {
+			st = *styles[i]
+			if selected {
+				st = st.Background(selBg).Bold(true)
+			}
 		}
+		b.WriteString(st.Render(text))
+		used += c.width
 	}
-	return " " + strings.Join(parts, "  ")
+	if rest := l.width - used; rest > 0 {
+		b.WriteString(base.Render(strings.Repeat(" ", rest)))
+	}
+	return b.String()
 }
 
 func (l *list) view() string {
@@ -176,7 +214,7 @@ func (l *list) view() string {
 		titles[i] = c.title
 	}
 	var b strings.Builder
-	b.WriteString(dimStyle.Render(l.line(titles)))
+	b.WriteString(l.renderLine(titles, nil, dimStyle, false))
 	b.WriteString("\n")
 	b.WriteString(dimStyle.Render(strings.Repeat("─", max(l.width, 1))))
 
@@ -188,23 +226,7 @@ func (l *list) view() string {
 			continue
 		}
 		r := l.rows[idx]
-		text := l.line(r.cells)
-		if len(r.styles) > 0 {
-			text = l.styledLine(r)
-		}
-		switch {
-		case len(r.styles) > 0:
-			// colored cells: no whole-line style, it would reset the cell colors
-		case idx == l.cursor && !r.header && !l.plain:
-			text = selectedStyle.Render(text)
-		case r.header && r.warn:
-			text = headerWarnStyle.Render(text)
-		case r.header:
-			text = headerStyle.Render(text)
-		case r.dim:
-			text = dimStyle.Render(text)
-		}
-		b.WriteString(text)
+		b.WriteString(l.renderLine(r.cells, r.styles, rowBase(r), idx == l.cursor && !r.header))
 	}
 	return lipgloss.NewStyle().MaxWidth(max(l.width, 1)).Render(b.String())
 }

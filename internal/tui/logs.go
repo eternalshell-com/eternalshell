@@ -123,7 +123,7 @@ func (m Model) logsTitleView() string {
 	if m.logs.loading {
 		hint = " · loading…"
 	}
-	return tabActive.Render(title) + tabInactive.Render(hint)
+	return titleStyle.Render(title) + infoStyle.Render(hint)
 }
 
 func (m Model) logsBodyView() string {
@@ -137,5 +137,5 @@ func (m Model) logsBodyView() string {
 }
 
 func (m Model) logsFooterView() string {
-	return footerStyle.Render(" ↑/↓ scroll · r reload · esc back · q quit")
+	return renderHints([]hint{{"↑/↓", "scroll"}, {"r", "reload"}, {"esc", "back"}, {"q", "quit"}})
 }

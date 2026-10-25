@@ -9,6 +9,7 @@ require (
 	github.com/mattn/go-runewidth v0.0.19
 	github.com/moby/moby/api v1.56.1
 	github.com/moby/moby/client v0.6.2
+	github.com/muesli/termenv v0.16.0
 	github.com/shirou/gopsutil/v4 v4.26.9
 	github.com/wneessen/go-mail v0.8.1
 	go.yaml.in/yaml/v3 v3.0.5
@@ -43,7 +44,6 @@ require (
 	github.com/moby/docker-image-spec v1.3.1 // indirect
 	github.com/muesli/ansi v0.0.0-20230316100256-276c6243b2f6 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect
-	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/power-devops/perfstat v0.0.0-20260805114148-88456608a4f6 // indirect
