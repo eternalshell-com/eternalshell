@@ -58,28 +58,53 @@ func diskClearMessage(n Notice, d Details) mail.Message {
 	return mail.Message{Subject: subject, Body: b.String()}
 }
 
-// writeDiskConsumers lists what Docker uses on a mount. It shows something for
-// the mount that holds Docker's data, and for any mount that holds bind-mounted
-// project directories. Other mounts get nothing.
-func writeDiskConsumers(b *strings.Builder, d Details, mount string) {
+// consumersState says what the disk mails can tell about Docker's use of a mount.
+type consumersState int
+
+const (
+	csNone        consumersState = iota // nothing to say about this mount
+	csUnavailable                       // Docker disk usage failed (Err)
+	csNotMeasured                       // the first measurement is not there yet
+	csShown                             // there are figures
+)
+
+// consumers is what the disk mails say about Docker's use of one mount. The text
+// and the HTML mail both read it, so their numbers cannot differ.
+type consumers struct {
+	State consumersState
+	Err   error
+
+	OnDockerMount bool                    // the mount holds Docker's own data
+	Projects      []collector.ProjectDisk // the biggest ones, only on Docker's mount
+	Dirs          []diskDir               // project folders and bind directories on this mount, biggest first
+	CrossMount    bool                    // some folders or binds are on other mounts
+
+	Usage *collector.DiskUsage
+
+	OtherKnown bool  // the mount itself is known, so "other" can be computed
+	OtherBytes int64 // used on the mount minus what Docker accounts for there
+	Approx     bool  // some figures could not be measured completely
+}
+
+// consumersFor works out what Docker uses on a mount. It has something to say
+// for the mount that holds Docker's data and for any mount that holds
+// bind-mounted project directories. Other mounts get nothing.
+func consumersFor(d Details, mount string) consumers {
 	snap := d.Snap
 	if snap == nil {
-		return
+		return consumers{State: csNone}
 	}
 	u := snap.Disk
 	if u == nil {
-		switch {
-		case snap.DiskErr != nil:
-			fmt.Fprintf(b, "\nDocker disk usage is not available: %v\n", snap.DiskErr)
-		default:
-			b.WriteString("\nDocker disk usage has not been measured yet.\n")
+		if snap.DiskErr != nil {
+			return consumers{State: csUnavailable, Err: snap.DiskErr}
 		}
-		return
+		return consumers{State: csNotMeasured}
 	}
 
-	onDockerMount := false
+	c := consumers{Usage: u, Approx: u.Unknown}
 	if root := collector.MountFor(snap.Mounts, u.RootDir); root != nil && u.RootDir != "" {
-		onDockerMount = root.Path == mount
+		c.OnDockerMount = root.Path == mount
 	}
 
 	// Project folders and bind directories that live on this mount.
@@ -97,29 +122,71 @@ func writeDiskConsumers(b *strings.Builder, d Details, mount string) {
 			hereBytes += bs.Bytes
 		}
 	}
-	if !onDockerMount && len(here) == 0 {
-		return
+	if !c.OnDockerMount && len(here) == 0 {
+		return consumers{State: csNone}
 	}
+	c.State = csShown
+	c.CrossMount = len(here) < len(u.Folders)+len(u.Binds)
+	c.Dirs = sortedDirs(here)
 
 	// What Docker accounts for on this mount, to subtract from "used".
 	accounted := hereBytes
-	if onDockerMount {
+	if c.OnDockerMount {
 		accounted += u.Layers + u.Logs + u.Volumes + u.Images + u.BuildCache
-	}
-
-	b.WriteString("\nBiggest consumers (Docker)\n")
-	if onDockerMount {
-		shown := 0
 		for _, p := range u.Projects {
-			if shown == topProjects || p.Total() == 0 {
+			if len(c.Projects) == topProjects || p.Total() == 0 {
 				break
 			}
-			shown++
-			name := p.Name
-			if p.Standalone {
-				name += " (container)"
-			}
-			fmt.Fprintf(b, "  %-26.26s %9s  (layers %s, volumes %s, files %s, binds %s, logs %s)\n", name,
+			c.Projects = append(c.Projects, p)
+		}
+	}
+	if d.Mount != nil {
+		c.OtherKnown = true
+		c.OtherBytes = max(int64(d.Mount.Used)-accounted, 0)
+	}
+	return c
+}
+
+// otherText is "Other (not Docker)": "-" if unknown, "~" in front if some
+// figures are approximate.
+func (c consumers) otherText() string {
+	if !c.OtherKnown {
+		return "-"
+	}
+	prefix := ""
+	if c.Approx {
+		prefix = "~"
+	}
+	return prefix + format.Bytes(uint64(c.OtherBytes))
+}
+
+// projectName is how a project is named in the list: containers say so.
+func projectName(p collector.ProjectDisk) string {
+	if p.Standalone {
+		return p.Name + " (container)"
+	}
+	return p.Name
+}
+
+// writeDiskConsumers lists what Docker uses on a mount.
+func writeDiskConsumers(b *strings.Builder, d Details, mount string) {
+	c := consumersFor(d, mount)
+	switch c.State {
+	case csNone:
+		return
+	case csUnavailable:
+		fmt.Fprintf(b, "\nDocker disk usage is not available: %v\n", c.Err)
+		return
+	case csNotMeasured:
+		b.WriteString("\nDocker disk usage has not been measured yet.\n")
+		return
+	}
+	u := c.Usage
+
+	b.WriteString("\nBiggest consumers (Docker)\n")
+	if c.OnDockerMount {
+		for _, p := range c.Projects {
+			fmt.Fprintf(b, "  %-26.26s %9s  (layers %s, volumes %s, files %s, binds %s, logs %s)\n", projectName(p),
 				format.BytesPartial(p.Total(), !p.Complete()),
 				format.Bytes(uint64(p.Layers)),
 				format.BytesPartial(p.Volumes, p.VolumesUnknown),
@@ -127,19 +194,19 @@ func writeDiskConsumers(b *strings.Builder, d Details, mount string) {
 				format.BytesPartial(p.Binds, p.BindsUnknown),
 				format.BytesPartial(p.Logs, p.LogsUnknown))
 		}
-		if shown == 0 {
+		if len(c.Projects) == 0 {
 			b.WriteString("  (no containers)\n")
 		}
 		fmt.Fprintf(b, "  %-26s %9s\n", "Images", format.Bytes(uint64(u.Images)))
 		fmt.Fprintf(b, "  %-26s %9s\n", "Build cache", format.Bytes(uint64(u.BuildCache)))
 		fmt.Fprintf(b, "  %-26s %9s  (unused volumes %s + dangling images %s)\n", "Reclaimable",
 			format.Bytes(uint64(u.Reclaimable)), format.Bytes(uint64(u.UnusedVolumes)), format.Bytes(uint64(u.DanglingImg)))
-		if len(here) < len(u.Folders)+len(u.Binds) {
+		if c.CrossMount {
 			b.WriteString("  Note: project figures include folders and bind mounts on other mounts; those are not subtracted below.\n")
 		}
 	} else {
 		b.WriteString("  Project folders and bind mounts on this mount:\n")
-		for i, dir := range sortedDirs(here) {
+		for i, dir := range c.Dirs {
 			if i == topProjects {
 				break
 			}
@@ -147,20 +214,8 @@ func writeDiskConsumers(b *strings.Builder, d Details, mount string) {
 		}
 	}
 
-	other := "-"
-	if d.Mount != nil {
-		o := int64(d.Mount.Used) - accounted
-		prefix := ""
-		if u.Unknown {
-			prefix = "~"
-		}
-		if o < 0 {
-			o = 0
-		}
-		other = prefix + format.Bytes(uint64(o))
-	}
-	fmt.Fprintf(b, "  %-26s %9s\n", "Other (not Docker)", other)
-	if u.Unknown {
+	fmt.Fprintf(b, "  %-26s %9s\n", "Other (not Docker)", c.otherText())
+	if c.Approx {
 		b.WriteString("  \"?\" or \"+?\": part of that could not be read or measured; \"~\" means the figure is approximate.\n")
 	}
 }

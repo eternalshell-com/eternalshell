@@ -129,7 +129,10 @@ func (r *reporter) tick(ctx context.Context, o Options, send SendFunc, snap *col
 		r.lg.event("INFO", "report: due, checking the domains and building it")
 		d := report.Build(ctx, report.Input{Snap: snap, Config: r.cfg, Prev: r.prev, Journal: r.journal, Now: now})
 		subject, body := report.Render(d)
-		r.pending = &pendingReport{msg: mail.Message{Subject: subject, Body: body}, state: report.SnapshotState(d)}
+		r.pending = &pendingReport{
+			msg:   mail.Message{Subject: subject, Body: body, HTML: report.RenderHTML(d)},
+			state: report.SnapshotState(d),
+		}
 	}
 
 	if err := send(ctx, r.cfg.SMTP, o.Password, r.pending.msg); err != nil {

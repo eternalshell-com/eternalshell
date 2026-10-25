@@ -27,8 +27,16 @@ type Details struct {
 	Mount *collector.Mount
 }
 
-// Message builds the mail for a notice.
+// Message builds the mail for a notice: the plain text, and an HTML version of
+// the same facts.
 func Message(n Notice, d Details) mail.Message {
+	m := textMessage(n, d)
+	m.HTML = htmlMessage(n, d)
+	return m
+}
+
+// textMessage builds the plain text mail for a notice.
+func textMessage(n Notice, d Details) mail.Message {
 	if n.Key.Rule == RuleDisk {
 		if n.Kind == KindClear {
 			return diskClearMessage(n, d)

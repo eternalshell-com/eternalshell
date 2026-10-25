@@ -18,6 +18,7 @@ import (
 	gomail "github.com/wneessen/go-mail"
 
 	"eternalshell/internal/config"
+	"eternalshell/internal/mailhtml"
 )
 
 const timeout = 15 * time.Second
@@ -29,6 +30,7 @@ const implicitTLSPort = 465
 type Message struct {
 	Subject string
 	Body    string // plain text
+	HTML    string // optional: sent as an alternative part next to the plain text
 }
 
 // Mode is how the connection gets encrypted.
@@ -63,17 +65,10 @@ func Send(ctx context.Context, cfg config.SMTP, password string, msg Message) er
 
 // send is Send with extra client options; tests use them to trust a test certificate.
 func send(ctx context.Context, cfg config.SMTP, password string, msg Message, extra ...gomail.Option) error {
-	m := gomail.NewMsg()
-	if err := m.From(cfg.FromAddress()); err != nil {
-		return fmt.Errorf("invalid sender address %q: %w", cfg.FromAddress(), err)
+	m, err := newMsg(cfg, msg)
+	if err != nil {
+		return err
 	}
-	if err := m.To(cfg.To...); err != nil {
-		return fmt.Errorf("invalid recipient address: %w", err)
-	}
-	m.Subject(msg.Subject)
-	m.SetBodyString(gomail.TypeTextPlain, msg.Body)
-	m.SetDate()
-	m.SetMessageID()
 
 	opts := []gomail.Option{
 		gomail.WithPort(cfg.Port),
@@ -98,9 +93,47 @@ func send(ctx context.Context, cfg config.SMTP, password string, msg Message, ex
 	return client.DialAndSendWithContext(ctx, m)
 }
 
+// newMsg builds the mail: addresses, subject, the plain text and, if there is
+// one, the HTML as an alternative part.
+func newMsg(cfg config.SMTP, msg Message) (*gomail.Msg, error) {
+	m := gomail.NewMsg()
+	if err := m.From(cfg.FromAddress()); err != nil {
+		return nil, fmt.Errorf("invalid sender address %q: %w", cfg.FromAddress(), err)
+	}
+	if err := m.To(cfg.To...); err != nil {
+		return nil, fmt.Errorf("invalid recipient address: %w", err)
+	}
+	m.Subject(msg.Subject)
+	m.SetBodyString(gomail.TypeTextPlain, msg.Body)
+	if msg.HTML != "" {
+		// multipart/alternative: the plain text stays as it is, the HTML part
+		// comes last, which is the one mail clients prefer.
+		m.AddAlternativeString(gomail.TypeTextHTML, msg.HTML)
+	}
+	m.SetDate()
+	m.SetMessageID()
+	return m, nil
+}
+
 // TestMessage is the body of `eternalshell test-mail`. It contains no secrets.
 func TestMessage(serverName string, now time.Time) Message {
 	host, _ := os.Hostname()
+
+	doc := mailhtml.New(serverName, now)
+	doc.Badge = mailhtml.Badge{Level: mailhtml.LevelOK, Text: "Mail works"}
+	doc.Title = "Test mail from EternalShell"
+	doc.Sections = []mailhtml.Section{{
+		Heading: "Test mail",
+		Blocks: []mailhtml.Block{
+			mailhtml.Facts(
+				mailhtml.Fact{Label: "Server", Value: serverName},
+				mailhtml.Fact{Label: "Host", Value: host},
+				mailhtml.Fact{Label: "Sent", Value: now.Format(time.RFC1123), Mono: true},
+			),
+			mailhtml.Text("If you can read this, alert mails from this server can reach you."),
+		},
+	}}
+
 	return Message{
 		Subject: fmt.Sprintf("[EternalShell] %s - test mail", serverName),
 		Body: fmt.Sprintf(`This is a test mail from EternalShell.
@@ -111,6 +144,7 @@ Sent:    %s
 
 If you can read this, alert mails from this server can reach you.
 `, serverName, host, now.Format(time.RFC1123)),
+		HTML: mailhtml.Render(doc),
 	}
 }
 

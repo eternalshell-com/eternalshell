@@ -206,8 +206,14 @@ func runReport(args []string) error {
 	fs := flag.NewFlagSet("report", flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to the config file")
 	sendMail := fs.Bool("send", false, "mail the report now and save the state")
+	// Hidden (not in the usage text): print the HTML part instead of the text, to
+	// open it in a browser. It sends nothing and saves nothing.
+	asHTML := fs.Bool("html", false, "print the HTML version of the report")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *asHTML && *sendMail {
+		return errors.New("--html only prints the HTML; it cannot be combined with --send")
 	}
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
@@ -245,6 +251,14 @@ func runReport(args []string) error {
 	d := report.Build(ctx, report.Input{Snap: snap, Config: cfg, Prev: prev, Now: time.Now()})
 	subject, body := report.Render(d)
 
+	if *asHTML {
+		html := report.RenderHTML(d)
+		if html == "" {
+			return errors.New("the HTML version could not be drawn")
+		}
+		fmt.Print(html)
+		return nil
+	}
 	if !*sendMail {
 		fmt.Println("Subject:", subject)
 		fmt.Println()
@@ -255,7 +269,7 @@ func runReport(args []string) error {
 	s := cfg.SMTP
 	fmt.Printf("Sending the report to %s via %s:%d (%s)...\n",
 		strings.Join(s.To, ", "), s.Host, s.Port, mail.TransportFor(s.Port))
-	if err := mail.Send(ctx, s, password, mail.Message{Subject: subject, Body: body}); err != nil {
+	if err := mail.Send(ctx, s, password, mail.Message{Subject: subject, Body: body, HTML: report.RenderHTML(d)}); err != nil {
 		return errors.New(mail.Explain(err, s))
 	}
 	fmt.Println("OK: the mail server accepted the report:", subject)
